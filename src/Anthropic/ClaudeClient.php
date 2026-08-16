@@ -102,6 +102,16 @@ final class ClaudeClient
      * thinking blocks (empty-texted by default), and with web search enabled
      * it carries server-tool-use and search-result blocks. Only `text` blocks
      * are the reply.
+     *
+     * Joined with NOTHING, not a newline. A plain answer arrives as a single
+     * text block, but a cited one — which is what web search produces — is
+     * split at every citation boundary into contiguous prose fragments that
+     * already carry their own spacing:
+     *
+     *     "…rated power output of " / "11 W x 2" / ", for a total of 22 watts."
+     *
+     * Joining those with "\n" injects line breaks mid-sentence, which Markdown
+     * then renders as visibly broken text in the posted reply.
      */
     private function extractText(Message $message): string
     {
@@ -121,7 +131,7 @@ final class ClaudeClient
             }
         }
 
-        return trim(implode("\n", $parts));
+        return trim(implode('', $parts));
     }
 
     private function client(): Client
