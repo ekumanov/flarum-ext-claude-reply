@@ -1,0 +1,7 @@
+/vendor
+/composer.lock
+js/node_modules
+docs/discuss-posts
+deploy
+.DS_Store
+.phpunit.result.cache

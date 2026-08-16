@@ -1,0 +1,43 @@
+{
+    "name": "ekumanov/flarum-ext-claude-reply",
+    "description": "Mention a designated bot account in a Flarum 2.0 discussion and Claude replies in-thread. Queue-backed, token-budgeted discussion context, allowlisted triggers, hard spend caps.",
+    "keywords": [
+        "flarum",
+        "extension",
+        "claude",
+        "anthropic",
+        "ai"
+    ],
+    "type": "flarum-extension",
+    "license": "MIT",
+    "require": {
+        "flarum/core": "^2.0",
+        "flarum/mentions": "^2.0",
+        "php": "^8.2",
+        "anthropic-ai/sdk": "^0.42"
+    },
+    "authors": [
+        {
+            "name": "ekumanov",
+            "email": "ekumanov@users.noreply.github.com"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Ekumanov\\ClaudeReply\\": "src/"
+        }
+    },
+    "extra": {
+        "flarum-extension": {
+            "title": "Claude Reply",
+            "category": "feature",
+            "icon": {
+                "name": "fas fa-robot",
+                "backgroundColor": "#D97757",
+                "color": "#fff"
+            }
+        }
+    },
+    "minimum-stability": "beta",
+    "prefer-stable": true
+}

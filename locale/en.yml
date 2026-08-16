@@ -1,0 +1,71 @@
+ekumanov-claude-reply:
+  admin:
+    settings:
+      enabled: Enable Claude replies
+      enabled_help: >-
+        Master switch. While off, nothing is queued and nothing is billed. Note the
+        API key is NOT set here — put it in config.php as
+        'claude_reply' => ['api_key' => 'sk-ant-...'].
+
+      bot_username: Bot account username
+      bot_username_help: >-
+        The forum account Claude posts as. Mentioning this account is what triggers a
+        reply. The account needs Reply permission in the allowed tags, and must not be
+        in a group whose posts require approval.
+
+      allowed_user_ids: Allowed trigger user IDs
+      allowed_user_ids_help: >-
+        Comma-separated user IDs permitted to summon a reply. EMPTY MEANS NOBODY —
+        this is deliberate, so enabling the extension cannot open the bot to the whole
+        forum by accident.
+
+      allowed_tag_ids: Allowed tag IDs
+      allowed_tag_ids_help: >-
+        Comma-separated tag IDs the bot will answer in. EMPTY MEANS NO TAG. Every post
+        in an allowed discussion may be sent to Anthropic as context, so opt in per tag
+        deliberately. Private discussions are always refused, regardless of this list.
+
+      model: Model
+      model_help: Model ID passed to the Messages API. Default claude-opus-5.
+
+      effort: Effort
+      effort_help: >-
+        Controls how much the model thinks and spends. Forum replies rarely need more
+        than medium; raise it if answers feel shallow.
+
+      max_tokens: Max response tokens
+      max_tokens_help: >-
+        Hard ceiling on the response INCLUDING thinking tokens. Sizing this to the
+        visible answer alone will truncate replies mid-sentence.
+
+      context_token_budget: Context token budget
+      context_token_budget_help: >-
+        Input-token ceiling for the thread excerpt. The builder walks backwards from the
+        mention until this is reached. The opening post is always included.
+
+      max_context_posts: Max context posts
+      max_context_posts_help: Hard cap on posts pulled into context, whatever the token budget allows.
+
+      daily_reply_limit: Replies per 24 hours
+      daily_reply_limit_help: >-
+        Forum-wide spend ceiling over a rolling 24-hour window. Set to 0 to block all
+        replies.
+
+      persona_prompt: Persona / house style
+      persona_prompt_help: >-
+        Appended to the built-in system prompt. Describe the community, the audience,
+        the tone and the language you want. Output format and safety rules are already
+        handled; use this for voice.
+
+      footer: Reply footer
+      footer_help: >-
+        Markdown appended to every reply — typically an AI-disclosure line. Leave empty
+        to disable.
+
+      web_search: Allow web search
+      web_search_help: >-
+        Lets Claude run server-side web searches while composing a reply, rather than
+        answering from memory alone. Billed separately (about $10 per 1,000 searches).
+
+      web_search_max_uses: Max searches per reply
+      web_search_max_uses_help: Caps searches for a single reply.
