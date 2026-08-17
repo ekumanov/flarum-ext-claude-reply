@@ -79,6 +79,11 @@ class TestReplyCommand extends Command
         $this->info('=== SUMMARY ===');
         $this->line('Posts included : '.count($context->posts).' of '.$context->totalComments);
         $this->line('Omitted        : '.$context->omitted);
+        $this->line('Window ended on: '.$context->stoppedOn.' (budget '.$settings->contextTokenBudget().', cap '.$settings->maxContextPosts().')');
+
+        if ($context->posts !== []) {
+            $this->line('Oldest included: post #'.$context->posts[0]->number.' of #'.$post->number);
+        }
         $this->line('Estimated tok  : '.$context->estimatedTokens().' (heuristic)');
         $this->line('Model          : '.$settings->model());
         $this->line('Effort         : '.$settings->effort());
@@ -190,7 +195,7 @@ class TestReplyCommand extends Command
         if ($discussion === null) {
             $rows[] = ['discussion', 'MISSING'];
         } else {
-            $tagDecision = $gate->discussion($discussion);
+            $tagDecision = $gate->discussion($discussion, $author);
             $rows[] = ['private discussion', $discussion->is_private ? 'YES — always refused' : 'no'];
             $rows[] = ['tag gate', ($tagDecision->allowed ? 'ALLOW' : 'DENY').' — '.$tagDecision->reason->value];
         }

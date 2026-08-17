@@ -115,6 +115,26 @@ app.initializers.add('ekumanov/claude-reply', () => {
   heading('access');
   note('access_intro', 'info');
 
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'admin_bypass_access',
+      type: 'boolean',
+      label: t('admin_bypass_access'),
+      help: t('admin_bypass_access_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'users_blocklist_mode',
+      type: 'boolean',
+      label: t('users_blocklist_mode'),
+      help: t('users_blocklist_mode_help'),
+    },
+    next()
+  );
+
   picker('allowed_users', userSource, { setting: 'allowed_user_ids' });
   picker('denied_users', userSource, { setting: 'denied_user_ids' });
   picker('allowed_groups', groupSource, { setting: 'allowed_group_ids' });
@@ -122,6 +142,26 @@ app.initializers.add('ekumanov/claude-reply', () => {
 
   // --- Where it may reply --------------------------------------------------
   heading('where');
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'tags_blocklist_mode',
+      type: 'boolean',
+      label: t('tags_blocklist_mode'),
+      help: t('tags_blocklist_mode_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'admin_bypass_tags',
+      type: 'boolean',
+      label: t('admin_bypass_tags'),
+      help: t('admin_bypass_tags_help'),
+    },
+    next()
+  );
 
   picker('allowed_tags', tagSource, { setting: 'allowed_tag_ids' });
   picker('denied_tags', tagSource, { setting: 'denied_tag_ids' });
@@ -214,6 +254,16 @@ app.initializers.add('ekumanov/claude-reply', () => {
       default: 25,
       label: t('max_context_posts'),
       help: t('max_context_posts_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'trigger_on_quote',
+      type: 'boolean',
+      label: t('trigger_on_quote'),
+      help: t('trigger_on_quote_help'),
     },
     next()
   );

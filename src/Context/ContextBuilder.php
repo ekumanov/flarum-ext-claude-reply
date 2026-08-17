@@ -2,6 +2,7 @@
 
 namespace Ekumanov\ClaudeReply\Context;
 
+use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 use Flarum\Extension\ExtensionManager;
 use Flarum\Post\CommentPost;
@@ -33,6 +34,7 @@ final class ContextBuilder
     public function __construct(
         private readonly SettingsRepository $settings,
         private readonly ExtensionManager $extensions,
+        private readonly BotAccount $bot,
     ) {}
 
     public function build(CommentPost $trigger): DiscussionContext
@@ -41,7 +43,17 @@ final class ContextBuilder
         $budget     = $this->settings->contextTokenBudget();
         $maxPosts   = $this->settings->maxContextPosts();
 
-        $totalComments = (int) $discussion->comments()->count();
+        // The discussion's real comment numbers, ascending. Doubles as the
+        // total and as the yardstick the gap markers are measured against —
+        // subtracting one post number from another is not the same thing once
+        // posts have been moved or deleted.
+        $allNumbers = $discussion->comments()
+            ->orderBy('number')
+            ->pluck('number')
+            ->map('intval')
+            ->all();
+
+        $totalComments = count($allNumbers);
 
         /** @var Collection<int, Post> $candidates newest first */
         $candidates = $discussion->comments()
@@ -70,14 +82,20 @@ final class ContextBuilder
             $tokens += $ctx->estimatedTokens();
         }
 
-        // Force-include whatever the trigger explicitly points at.
+        $stoppedOn = count($selected) >= $maxPosts ? 'post cap' : ($tokens >= $budget ? 'token budget' : 'whole discussion');
+
+        // Force-include whatever the trigger explicitly points at. These and the
+        // opening post below are additions the walk did not budget for, so they
+        // are capped too — previously they were appended unchecked, which is how
+        // a configured budget of 20000 produced a 23237-token context. The
+        // trigger itself is exempt and was already taken above.
         foreach ($this->quotedPostIds($trigger) as $postId) {
             $quoted = $discussion->comments()->with(['user', 'mentionsUsers'])->find($postId);
             if ($quoted === null) {
                 continue;
             }
             $ctx = $this->toContextPost($quoted, $discussion->first_post_id, $trigger->id);
-            if (! isset($selected[$ctx->number])) {
+            if (! isset($selected[$ctx->number]) && $tokens + $ctx->estimatedTokens() <= $budget) {
                 $selected[$ctx->number] = $ctx;
                 $tokens += $ctx->estimatedTokens();
             }
@@ -98,8 +116,10 @@ final class ContextBuilder
                 $first = $discussion->comments()->with(['user', 'mentionsUsers'])->find($firstPostId);
                 if ($first !== null) {
                     $ctx = $this->toContextPost($first, $firstPostId, $trigger->id);
-                    $selected[$ctx->number] = $ctx;
-                    $tokens += $ctx->estimatedTokens();
+                    if ($tokens + $ctx->estimatedTokens() <= $budget) {
+                        $selected[$ctx->number] = $ctx;
+                        $tokens += $ctx->estimatedTokens();
+                    }
                 }
             }
         }
@@ -115,12 +135,25 @@ final class ContextBuilder
             posts: $posts,
             omitted: $omitted,
             totalComments: $totalComments,
+            allNumbers: $allNumbers,
+            stoppedOn: $stoppedOn,
         );
     }
 
     private function toContextPost(Post $post, ?int $firstPostId, int $triggerId): ContextPost
     {
         $author = $post->user;
+        $botId = $this->bot->id();
+        $text = $this->unparse($post);
+
+        // The bot's own replies come back as ordinary posts, footer and all.
+        // Left in, the model reads the disclosure line as house style and
+        // writes its own — and then the job appends the real one, so the reply
+        // ends with two. Strip it here, at the point where its own output is
+        // fed back to it.
+        if ($botId !== null && $author?->id !== null && (int) $author->id === $botId) {
+            $text = $this->stripFooter($text);
+        }
 
         return new ContextPost(
             id: (int) $post->id,
@@ -129,10 +162,33 @@ final class ContextBuilder
             authorId: $author?->id !== null ? (int) $author->id : null,
             authorUsername: $author?->username,
             createdAt: $post->created_at?->toDateString() ?? '',
-            text: $this->unparse($post),
+            text: $text,
             isOpeningPost: $firstPostId !== null && $post->id === $firstPostId,
             isTrigger: $post->id === $triggerId,
         );
+    }
+
+    /**
+     * Remove the configured footer from the end of one of the bot's own posts.
+     *
+     * Loops, because posts already published with the duplicate bug carry it
+     * twice and both copies have to go.
+     */
+    private function stripFooter(string $text): string
+    {
+        $footer = $this->settings->footer();
+
+        if ($footer === '') {
+            return $text;
+        }
+
+        $text = rtrim($text);
+
+        while (str_ends_with($text, $footer)) {
+            $text = rtrim(substr($text, 0, -strlen($footer)));
+        }
+
+        return $text;
     }
 
     /**

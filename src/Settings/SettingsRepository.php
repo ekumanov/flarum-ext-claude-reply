@@ -56,6 +56,54 @@ final class SettingsRepository
     }
 
     /**
+     * Whether administrators skip the member/group lists and the per-member cap.
+     *
+     * On by default. Gating an admin achieves nothing a determined admin cannot
+     * undo in the settings page thirty seconds later, and being silently
+     * excluded from a feature you administer is a confusing way to find that
+     * out — which is exactly how this setting came to exist.
+     */
+    public function adminBypassAccess(): bool
+    {
+        return $this->boolSetting('admin_bypass_access', true);
+    }
+
+    /**
+     * Whether administrators may also summon a reply in tags the lists refuse.
+     *
+     * OFF by default, unlike the access bypass, because the tag lists are not
+     * an access control — they are the boundary that decides which of the
+     * forum's content is allowed to leave it. Denying a tag is usually a
+     * statement about members' privacy rather than about who is trusted, and an
+     * admin absent-mindedly mentioning the bot in a private-ish tag is precisely
+     * the accident the list is there to prevent. Turn it on if you would rather
+     * have the reach; it is your forum.
+     */
+    public function adminBypassTags(): bool
+    {
+        return $this->boolSetting('admin_bypass_tags', false);
+    }
+
+    /**
+     * Whether the member/group lists are a blocklist rather than an allow-list.
+     *
+     * Off means "only those listed"; on means "everyone except those denied".
+     * An explicit setting rather than something inferred from a list being
+     * empty — see {@see \Ekumanov\ClaudeReply\Access\AccessResolver} for why
+     * inferring it would be the dangerous choice.
+     */
+    public function usersBlocklistMode(): bool
+    {
+        return $this->boolSetting('users_blocklist_mode', false);
+    }
+
+    /** Same, for tags: off = only these tags, on = all tags except these. */
+    public function tagsBlocklistMode(): bool
+    {
+        return $this->boolSetting('tags_blocklist_mode', false);
+    }
+
+    /**
      * Users who may (or may never) summon a reply.
      *
      * `allowed_user_ids` keeps its historical name and comma-separated format,
@@ -91,6 +139,20 @@ final class SettingsRepository
             allowed: $this->idListSetting('allowed_tag_ids'),
             denied: $this->idListSetting('denied_tag_ids'),
         );
+    }
+
+    /**
+     * Also treat a reply to, or a quote of, one of the bot's posts as a trigger.
+     *
+     * Off by default. Flarum's Reply arrow and Quote button insert a POST
+     * mention, not a user mention, so they do not summon the bot — which
+     * surprises people, hence this switch. It stays off because the surprise
+     * cuts both ways: in a thread ABOUT the bot, members quote its posts to
+     * discuss them, and it would barge into every one of those.
+     */
+    public function replyToQuotes(): bool
+    {
+        return $this->boolSetting('trigger_on_quote', false);
     }
 
     /** Model id passed to the Messages API. */

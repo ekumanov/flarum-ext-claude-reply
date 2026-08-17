@@ -15,8 +15,10 @@ ekumanov-claude-reply:
       access_intro: >-
         Deny lists win over allow lists, and a person wins over their groups. So a member of
         an allowed group can be denied individually, and a member of a denied group can be
-        allowed individually. An empty allow list means NOBODY: deny lists only subtract from
-        what the allow lists have granted, they never open anything up on their own.
+        allowed individually. Leaving the member lists empty does NOT mean nobody — it means
+        the question passes down to the groups, which is why allowing a group on its own works
+        fine. Only somebody matched by no list at all is refused, and the switch below changes
+        what happens to them.
 
       # --- connection -------------------------------------------------------
       enabled: Enable Claude replies
@@ -49,11 +51,23 @@ ekumanov-claude-reply:
       bot_account_missing: '"{username}" does not exist on this forum.'
 
       # --- access -----------------------------------------------------------
+      admin_bypass_access: Administrators are always allowed
+      admin_bypass_access_help: >-
+        Administrators skip the lists below and the per-member limit. On by default: gating
+        someone who can edit these settings achieves nothing, and being quietly excluded from
+        a feature you administer is a confusing way to discover it.
+
+      users_blocklist_mode: Allow everyone except those denied
+      users_blocklist_mode_help: >-
+        Off (default): only the members and groups listed below may summon a reply. On: anyone
+        may, except those you deny. Every other rule is unchanged — deny still beats allow, and
+        an individual entry still beats a group one. Turning this on lets any member spend your
+        API budget, bounded only by the two limits further down.
+
       allowed_users: Allowed members
       allowed_users_help: >-
-        Members permitted to summon a reply. EMPTY MEANS NOBODY, whatever the groups below
-        say — this is deliberate, so enabling the extension cannot open the bot to the whole
-        forum by accident.
+        Members permitted to summon a reply. Leaving this empty does not mean nobody — it hands
+        the decision to the groups below.
       denied_users: Denied members
       denied_users_help: >-
         Members who may never summon a reply, even if they are allowed above or belong to an
@@ -67,9 +81,24 @@ ekumanov-claude-reply:
         Members of these groups may not summon a reply — unless they are individually
         allowed, which overrides their group.
 
+      tags_blocklist_mode: Answer in all tags except those denied
+      tags_blocklist_mode_help: >-
+        Off (default): the bot answers only in the tags listed below. On: it answers anywhere
+        except the tags you deny. Remember what a tag list controls — every post in an answered
+        discussion may be sent to Anthropic as context — so turning this on opts your whole
+        forum in, minus the exceptions.
+
+      admin_bypass_tags: Administrators may answer in any tag
+      admin_bypass_tags_help: >-
+        OFF by default, unlike the access bypass above, and deliberately so. The tag lists are
+        not about who is trusted; they decide which of your members' content is allowed to
+        leave the forum. An administrator absent-mindedly mentioning the bot in a private-ish
+        tag is exactly the accident the list prevents. Private discussions are always refused
+        regardless of this setting.
+
       allowed_tags: Allowed tags
       allowed_tags_help: >-
-        Tags the bot will answer in. EMPTY MEANS NO TAG. Every post in an answered discussion
+        Tags the bot will answer in. Empty means no tag, unless the switch above is on. Every post in an answered discussion
         may be sent to Anthropic as context, so opt in per tag deliberately. Selecting a
         parent tag covers its children, because a discussion in a child tag carries the
         parent too. Private discussions are always refused, whatever is listed here.
@@ -122,6 +151,14 @@ ekumanov-claude-reply:
 
       max_context_posts: Max context posts
       max_context_posts_help: Hard cap on posts pulled into context, whatever the token budget allows.
+
+      trigger_on_quote: Also reply when quoted
+      trigger_on_quote_help: >-
+        Flarum's Reply arrow and Quote button insert a link to a post, not a mention of an
+        account, so by default they do not summon the bot — only an @-mention does. Turn this
+        on to treat replying to or quoting one of the bot's own posts as a summons too. Off by
+        default because in a discussion about the bot, members quote it in order to talk about
+        it, and it would join every one of those conversations uninvited.
 
       web_search: Allow web search
       web_search_help: >-

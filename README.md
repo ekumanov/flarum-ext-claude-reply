@@ -54,11 +54,21 @@ Six lists, in three pairs — members, groups, tags — each with an allow list 
 4. allowed groups → **yes**
 5. nothing matched → **no**
 
-Two rules fall out of that, and they are the ones to remember. **Deny beats allow within a category**, so listing someone in both is a deny — which makes a deny list safe to reach for in a hurry. And **a person beats their groups**, so a member of an allowed group can be denied individually, and a member of a denied group can be allowed individually.
+Two rules fall out of that, and they are the ones to remember. **Deny beats allow within a level**, so listing someone in both is a deny — which makes a deny list safe to reach for in a hurry. And **a person beats their groups**, so a member of an allowed group can be denied individually, and a member of a denied group can be allowed individually.
 
-**An empty allow list means nobody**, whatever the deny lists say. A deny list only subtracts from what an allow list has granted; it is never a policy on its own. That is deliberate — it is what makes "enable the extension" a safe thing to do by accident.
+**An empty members list does not mean nobody.** It means that level had nothing to say and the question passes to the groups, which is why allowing one group works perfectly well with both member lists empty. Only step 5 — matched by nothing at either level — is a refusal.
 
-Tags work the same way, minus the hierarchy: one denied tag on a discussion refuses it even if another of its tags is allowed. Parent tags need no special rule — Flarum attaches the parent whenever a child is selected, so allowing or denying a parent covers its children through the data.
+**Administrators are allowed by default**, skipping the lists entirely. Gating someone who can rewrite these settings achieves nothing, and being quietly excluded from a feature you administer is a confusing way to find out. There is a switch if you disagree.
+
+### Blocklist mode
+
+Each of the two questions — who, and where — has a switch turning it from an allow-list into a blocklist: *everyone except those denied*. It changes exactly one thing, the final step, so every precedence rule above still holds.
+
+It is an explicit setting rather than something inferred from a list being empty. Inferring it was considered and rejected: the same empty field would mean "nobody" or "everybody" depending on a neighbouring field, and it would fail *open* on a config edit — adding one denied tag would silently expose every other tag on the forum.
+
+Tags work like members, minus the hierarchy: one denied tag on a discussion refuses it even if another of its tags is allowed. Parent tags need no special rule — Flarum attaches the parent whenever a child is selected, so allowing or denying a parent covers its children through the data.
+
+Note that admins bypass the *member* lists by default but **not** the tag lists, which default to no bypass. The tag lists are not about who is trusted; they decide which of your members' content may leave the forum, and an admin absent-mindedly mentioning the bot in a private-ish tag is the accident they exist to prevent. Private discussions are refused for everybody, always.
 
 ## Limits
 
@@ -74,6 +84,8 @@ The warning is advisory. The server enforces the cap regardless, and records a `
 ## Quoting and replying
 
 Claude is given each post's real Flarum mention token in the context it reads (`@"Name"#p123`), and uses them to quote and reply the way the Reply and Quote buttons do — a real blockquote, a real reply pointer, not a plain-text paraphrase.
+
+Note the reverse does not hold by default: Flarum's Reply arrow and Quote button insert a link to a *post*, not a mention of an *account*, so quoting the bot does not summon it. Only an @-mention does. There is a setting to accept quotes as well, off by default — in a thread about the bot, members quote it to talk about it, and it would join every one of those conversations uninvited.
 
 Anything it emits that points at a post or a person it was **not** shown is stripped before publishing, leaving the bare name behind. A wrong post id would only render as visible junk, but a wrong *user* id notifies a real member who had nothing to do with the discussion, and a group mention notifies everyone in the group. Only the ids that were in the context survive; flarum/mentions rewrites the display name from the id on parse, so a stale nickname corrects itself.
 

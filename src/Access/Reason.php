@@ -19,6 +19,8 @@ enum Reason: string
     case GroupDenied  = 'group_denied';
     case GroupAllowed = 'group_allowed';
     case NotListed    = 'not_listed';
+    case NotDenied    = 'not_denied';
+    case AdminBypass  = 'administrator';
 
     // Tag gate.
     case TagDenied    = 'tag_denied';

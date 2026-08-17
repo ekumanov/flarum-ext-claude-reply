@@ -167,8 +167,13 @@ class GenerateReplyJob extends AbstractJob
 
         $text = $sanitized->text;
 
+        // Append the disclosure footer, unless the model has already written
+        // one. The prompt tells it not to, and its own past posts no longer
+        // arrive carrying one, but a paraphrase is still cheap to guard against
+        // and a duplicate is visible to every reader.
         $footer = $settings->footer();
-        if ($footer !== '') {
+
+        if ($footer !== '' && ! str_ends_with(rtrim($text), $footer)) {
             $text .= "\n\n".$footer;
         }
 

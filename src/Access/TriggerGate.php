@@ -28,6 +28,10 @@ final class TriggerGate
     /** May this member summon a reply at all? */
     public function user(User $actor): Decision
     {
+        if ($actor->isAdmin() && $this->settings->adminBypassAccess()) {
+            return Decision::allow(Reason::AdminBypass);
+        }
+
         $decision = AccessResolver::atUserLevel((int) $actor->id, $this->settings->users());
 
         // Settled by the member's own entry — their groups are irrelevant, so
@@ -37,29 +41,39 @@ final class TriggerGate
         }
 
         $groups = $this->settings->groups();
+        $blocklist = $this->settings->usersBlocklistMode();
 
-        // No group lists configured: nothing for the group step to match, and
-        // the answer is the fail-closed default either way. Most forums (prod
-        // among them) run member lists only, so this keeps the common path
-        // query-free too.
+        // No group lists configured: nothing for the group step to match, so
+        // the answer is whichever default the mode calls for and the member's
+        // groups need not be loaded at all.
         if ($groups->isEmpty()) {
-            return AccessResolver::atGroupLevel([], $groups);
+            return AccessResolver::atGroupLevel([], $groups, $blocklist);
         }
 
-        return AccessResolver::atGroupLevel($this->groupIds($actor), $groups);
+        return AccessResolver::atGroupLevel($this->groupIds($actor), $groups, $blocklist);
     }
 
     /**
      * May the bot answer in this discussion?
      *
-     * With flarum-tags disabled there are no tags to satisfy an allow-list
-     * with, so nothing is answerable. That is intentional: the tag lists are
-     * the only per-discussion consent boundary the extension has.
+     * The tag lists are the only per-discussion consent boundary the extension
+     * has, so in allow-list mode a discussion the lists do not cover is
+     * refused — including every discussion on a forum with tags disabled.
      */
-    public function discussion(object $discussion): Decision
+    public function discussion(object $discussion, ?User $actor = null): Decision
     {
+        if ($actor?->isAdmin() && $this->settings->adminBypassTags()) {
+            return Decision::allow(Reason::AdminBypass);
+        }
+
+        $blocklist = $this->settings->tagsBlocklistMode();
+
         if (! $this->extensions->isEnabled('flarum-tags')) {
-            return Decision::deny(Reason::TagsDisabled);
+            // Without tags there is no allow-list to satisfy — but equally
+            // nothing to exclude, so a blocklist has no objection either.
+            return $blocklist
+                ? Decision::allow(Reason::NotDenied)
+                : Decision::deny(Reason::TagsDisabled);
         }
 
         try {
@@ -68,7 +82,7 @@ final class TriggerGate
             return Decision::deny(Reason::NoTags);
         }
 
-        return AccessResolver::forTags($tagIds, $this->settings->tags());
+        return AccessResolver::forTags($tagIds, $this->settings->tags(), $blocklist);
     }
 
     /**

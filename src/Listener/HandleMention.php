@@ -97,8 +97,9 @@ final class HandleMention
         // post on the forum: no user mention in the stored XML means this post
         // cannot be a trigger, whoever wrote it. No query, no parsing.
         $xml = (string) $post->parsed_content;
+        $alsoQuotes = $this->settings->replyToQuotes();
 
-        if (! str_contains($xml, '<USERMENTION')) {
+        if (! str_contains($xml, '<USERMENTION') && ! ($alsoQuotes && str_contains($xml, '<POSTMENTION'))) {
             return;
         }
 
@@ -124,7 +125,7 @@ final class HandleMention
             return;
         }
 
-        if (! $this->mentionsBot($xml, $botId)) {
+        if (! $this->mentionsBot($xml, $botId) && ! ($alsoQuotes && $this->quotesBot($xml, $botId))) {
             return;
         }
 
@@ -151,7 +152,7 @@ final class HandleMention
             return;
         }
 
-        $tagDecision = $this->gate->discussion($discussion);
+        $tagDecision = $this->gate->discussion($discussion, $actor);
 
         if (! $tagDecision->allowed) {
             return;
@@ -244,6 +245,31 @@ final class HandleMention
         }
 
         return in_array((string) $botId, array_map('strval', $ids), true);
+    }
+
+    /**
+     * True when the post replies to or quotes one of the bot's own posts.
+     *
+     * Both affordances produce a POSTMENTION carrying the quoted post's id, so
+     * this is a lookup of those ids' authors — one query, and only for posts
+     * that already carry a post mention, on a forum that has opted in.
+     */
+    private function quotesBot(string $xml, int $botId): bool
+    {
+        try {
+            $ids = Utils::getAttributeValues($xml, 'POSTMENTION', 'id');
+        } catch (Throwable) {
+            return false;
+        }
+
+        if ($ids === []) {
+            return false;
+        }
+
+        return CommentPost::query()
+            ->whereIn('id', array_map('intval', $ids))
+            ->where('user_id', $botId)
+            ->exists();
     }
 
     /**
