@@ -7,7 +7,11 @@ use Anthropic\Messages\Message;
 use Anthropic\Messages\WebSearchTool20260209;
 use Ekumanov\ClaudeReply\Settings\ApiKey;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
+use GuzzleHttp\Client as GuzzleClient;
+use Psr\Http\Client\ClientInterface;
 use RuntimeException;
+use Symfony\Component\HttpClient\HttpClient as SymfonyHttpClient;
+use Symfony\Component\HttpClient\Psr18Client as SymfonyPsr18Client;
 
 /**
  * Thin wrapper over the Anthropic Messages API for the one call this
@@ -26,7 +30,12 @@ use RuntimeException;
  */
 final class ClaudeClient
 {
-    /** Wall-clock ceiling for one API call. Thinking turns can be slow. */
+    /**
+     * Wall-clock ceiling for one API call. Thinking turns are slow, and a turn
+     * that runs a couple of web searches is slower still. Enforced by the
+     * transport built in {@see transporter()} — passing it to the SDK as a
+     * request option does nothing.
+     */
     private const TIMEOUT_SECONDS = 300.0;
 
     public function __construct(
@@ -49,6 +58,8 @@ final class ClaudeClient
             model: $this->settings->model(),
             system: $this->systemPrompt->build($forumTitle, $botName),
             thinking: ['type' => 'adaptive'],
+            // Advisory only (see transporter()); the real ceiling is the
+            // transport's. Kept so the intent is visible at the call site.
             requestOptions: ['timeout' => 30.0],
         )->inputTokens;
     }
@@ -178,6 +189,56 @@ final class ClaudeClient
             throw new RuntimeException('claude-reply: no Anthropic API key configured');
         }
 
-        return new Client(apiKey: $key);
+        return new Client(
+            apiKey: $key,
+            requestOptions: ['transporter' => $this->transporter()],
+        );
+    }
+
+    /**
+     * An HTTP client that will actually wait for a slow reply.
+     *
+     * The SDK's `timeout` request option is advisory and nothing in the SDK
+     * reads it — its own docblock says so: "the timeout is enforced by the
+     * caller-supplied transport". Supply no transport and PSR-18 discovery
+     * picks one whose default comes from PHP's `default_socket_timeout`, which
+     * ships as 60 seconds. A reply that takes longer than that dies with a
+     * connection error, and this extension routinely takes longer: thinking
+     * plus a couple of server-side web searches on a technical question runs
+     * well past a minute. It failed at exactly 61s, twice, which is what sent
+     * us looking here.
+     *
+     * So the transport is constructed explicitly rather than discovered. It
+     * costs nothing when the request is quick, and it is the difference between
+     * "web search is enabled" and "web search works".
+     *
+     * Falls back to raising `default_socket_timeout` for the call when neither
+     * supported client is installed — cruder, and global for the process, but a
+     * queue worker doing one thing at a time can live with it, and it beats
+     * inheriting a minute.
+     */
+    private function transporter(): ?ClientInterface
+    {
+        $seconds = (int) ceil(self::TIMEOUT_SECONDS);
+
+        if (class_exists(SymfonyPsr18Client::class) && class_exists(SymfonyHttpClient::class)) {
+            return new SymfonyPsr18Client(SymfonyHttpClient::create([
+                'timeout' => self::TIMEOUT_SECONDS,
+                'max_duration' => self::TIMEOUT_SECONDS,
+            ]));
+        }
+
+        if (class_exists(GuzzleClient::class)) {
+            return new GuzzleClient([
+                'timeout' => self::TIMEOUT_SECONDS,
+                'connect_timeout' => 10.0,
+            ]);
+        }
+
+        if ((int) ini_get('default_socket_timeout') < $seconds) {
+            ini_set('default_socket_timeout', (string) $seconds);
+        }
+
+        return null;
     }
 }

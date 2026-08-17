@@ -103,11 +103,29 @@ final class ReplyQuota
         return Decision::allow(Reason::Ok);
     }
 
+    /**
+     * Count what was actually spent, not what was attempted.
+     *
+     * `skipped` never counted — nothing reached the API. Failures need the same
+     * treatment, but only some of them: a job that died before the API answered
+     * (a network error, a timeout) cost nothing and must not consume a member's
+     * daily allowance, whereas one that failed *after* a response — a refusal,
+     * an empty reply — was billed and must. Recorded token usage is what tells
+     * the two apart.
+     *
+     * Not academic: two transport failures in a row took a member from 0 to
+     * their 2-a-day limit without a single token being billed, and left them
+     * unable to try again.
+     */
     private function countSince(?int $userId): int
     {
         $query = ReplyLog::query()
             ->where('created_at', '>=', Carbon::now()->subDay())
-            ->where('status', '!=', ReplyLog::STATUS_SKIPPED);
+            ->where('status', '!=', ReplyLog::STATUS_SKIPPED)
+            ->where(function ($q) {
+                $q->where('status', '!=', ReplyLog::STATUS_FAILED)
+                    ->orWhereNotNull('input_tokens');
+            });
 
         if ($userId !== null) {
             $query->where('trigger_user_id', $userId);
