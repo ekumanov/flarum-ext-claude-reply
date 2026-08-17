@@ -168,6 +168,11 @@ class TestReplyCommand extends Command
         } else {
             $decision = $gate->user($author);
             $rows[] = ['post author', $author->username.' (id '.$author->id.')'];
+            // Printed because a gate that resolves no groups looks identical to
+            // a member who is in none — which is how a version-incompatible
+            // lookup went unnoticed until an admin wondered why an allowed
+            // group matched nobody.
+            $rows[] = ['author groups', implode(', ', $gate->groupIdsFor($author)) ?: '(none resolved)'];
             $rows[] = ['user gate', ($decision->allowed ? 'ALLOW' : 'DENY').' — '.$decision->reason->value];
         }
 
