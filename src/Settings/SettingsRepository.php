@@ -2,6 +2,7 @@
 
 namespace Ekumanov\ClaudeReply\Settings;
 
+use Ekumanov\ClaudeReply\Access\IdList;
 use Flarum\Settings\SettingsRepositoryInterface;
 
 /**
@@ -10,10 +11,9 @@ use Flarum\Settings\SettingsRepositoryInterface;
  * Defaults live here, not in a migration — no DB rows are written unless the
  * admin actively changes a value.
  *
- * The API key is deliberately NOT a setting. It is read from config.php
- * (see {@see ApiKey}), same pattern as the edge-cache Cloudflare token: the
- * settings table is Redis-cached, dumped into every backup, and rendered in
- * the admin payload for anyone with admin access.
+ * The API key is a special case: config.php takes precedence over the settings
+ * table, and the settings copy is masked out of the admin payload. See
+ * {@see ApiKey} and {@see ApiKeyPrivacy}.
  */
 final class SettingsRepository
 {
@@ -30,41 +30,74 @@ final class SettingsRepository
         return $this->boolSetting('enabled', false);
     }
 
-    /** Username of the account Claude posts as. Mentioning it is the trigger. */
+    /**
+     * Id of the account Claude posts as, when one has been picked in the admin
+     * UI. Preferred over {@see botUsername()} because it survives a rename.
+     */
+    public function botUserId(): ?int
+    {
+        $v = (int) ($this->settings->get(self::PREFIX.'bot_user_id') ?? 0);
+
+        return $v > 0 ? $v : null;
+    }
+
+    /**
+     * Username of the account Claude posts as.
+     *
+     * Retained as the fallback for installs configured before the admin UI
+     * switched to a user picker (prod among them), and as the value shown when
+     * the picked account can no longer be resolved.
+     */
     public function botUsername(): string
     {
         $v = trim((string) ($this->settings->get(self::PREFIX.'bot_username') ?? ''));
+
         return $v === '' ? 'claude_user' : $v;
     }
 
     /**
-     * User IDs allowed to trigger a reply. Empty means NOBODY — this is a
-     * deliberate fail-closed default so an accidental enable can't open the
-     * bot to the whole forum.
+     * Users who may (or may never) summon a reply.
      *
-     * @return list<int>
+     * `allowed_user_ids` keeps its historical name and comma-separated format,
+     * so an install configured before the picker existed keeps working
+     * untouched.
      */
-    public function allowedUserIds(): array
+    public function users(): IdList
     {
-        return array_map('intval', $this->csvSetting('allowed_user_ids'));
+        return new IdList(
+            allowed: $this->idListSetting('allowed_user_ids'),
+            denied: $this->idListSetting('denied_user_ids'),
+        );
+    }
+
+    /** Groups whose members may (or may never) summon a reply. */
+    public function groups(): IdList
+    {
+        return new IdList(
+            allowed: $this->idListSetting('allowed_group_ids'),
+            denied: $this->idListSetting('denied_group_ids'),
+        );
     }
 
     /**
-     * Tag IDs the bot will answer in. Empty means NO tag is allowed — again
-     * fail-closed, so enabling the extension does not silently expose every
-     * discussion on the forum to a third-party API.
+     * Tags the bot will (or will never) answer in.
      *
-     * @return list<int>
+     * Every post in an answered discussion may be sent to Anthropic as
+     * context, which is why this is opt-in per tag rather than forum-wide.
      */
-    public function allowedTagIds(): array
+    public function tags(): IdList
     {
-        return array_map('intval', $this->csvSetting('allowed_tag_ids'));
+        return new IdList(
+            allowed: $this->idListSetting('allowed_tag_ids'),
+            denied: $this->idListSetting('denied_tag_ids'),
+        );
     }
 
     /** Model id passed to the Messages API. */
     public function model(): string
     {
         $v = trim((string) ($this->settings->get(self::PREFIX.'model') ?? ''));
+
         return $v === '' ? 'claude-opus-5' : $v;
     }
 
@@ -75,6 +108,7 @@ final class SettingsRepository
     public function effort(): string
     {
         $v = strtolower(trim((string) ($this->settings->get(self::PREFIX.'effort') ?? '')));
+
         return in_array($v, ['low', 'medium', 'high', 'xhigh', 'max'], true) ? $v : 'medium';
     }
 
@@ -107,6 +141,21 @@ final class SettingsRepository
     public function dailyReplyLimit(): int
     {
         return max(0, $this->intSetting('daily_reply_limit', 25));
+    }
+
+    /**
+     * Replies one member may summon per rolling 24h.
+     *
+     * Note the asymmetry with {@see dailyReplyLimit()}, where 0 blocks
+     * everything: here 0 means "no per-user limit", because this setting
+     * refines an already fail-closed gate rather than forming it. Access is
+     * decided by the allow-lists; this only stops one member from spending the
+     * forum's whole daily budget by themselves. "Block everybody" is already
+     * expressible — turn the extension off, or set the forum limit to 0.
+     */
+    public function perUserDailyLimit(): int
+    {
+        return max(0, $this->intSetting('per_user_daily_limit', 2));
     }
 
     /**
@@ -143,30 +192,56 @@ final class SettingsRepository
     private function boolSetting(string $key, bool $default): bool
     {
         $v = $this->settings->get(self::PREFIX.$key);
+
         if ($v === null || $v === '') {
             return $default;
         }
+
         return (bool) $v && $v !== '0';
     }
 
     private function intSetting(string $key, int $default): int
     {
         $v = $this->settings->get(self::PREFIX.$key);
+
         return $v === null || $v === '' ? $default : (int) $v;
     }
 
     /**
-     * @return list<string>
+     * Parse a comma-separated id list.
+     *
+     * Tolerant of whatever separators an admin (or an older hand-edited value)
+     * left behind, and drops anything that is not a positive integer so a
+     * stray word can never widen or narrow a list by accident.
+     *
+     * @return list<int>
      */
-    private function csvSetting(string $key): array
+    private function idListSetting(string $key): array
     {
         $raw = (string) ($this->settings->get(self::PREFIX.$key) ?? '');
-        if ($raw === '') {
+
+        if (trim($raw) === '') {
             return [];
         }
+
         $items = preg_split('/[\s,;]+/', $raw) ?: [];
-        $items = array_map(fn ($s) => trim($s), $items);
-        $items = array_filter($items, fn ($s) => $s !== '');
-        return array_values(array_unique($items));
+
+        $ids = [];
+
+        foreach ($items as $item) {
+            $item = trim($item);
+
+            if ($item === '' || ! ctype_digit($item)) {
+                continue;
+            }
+
+            $id = (int) $item;
+
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        return array_values(array_unique($ids));
     }
 }

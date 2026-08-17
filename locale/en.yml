@@ -1,42 +1,119 @@
 ekumanov-claude-reply:
   admin:
+    permissions:
+      bypass_user_limit: Bypass the per-member Claude reply limit
+
     settings:
+      # --- sections ---------------------------------------------------------
+      section_general: Connection
+      section_access: Who may summon a reply
+      section_where: Where it may reply
+      section_limits: Spend limits
+      section_model: Model and generation
+      section_voice: Voice
+
+      access_intro: >-
+        Deny lists win over allow lists, and a person wins over their groups. So a member of
+        an allowed group can be denied individually, and a member of a denied group can be
+        allowed individually. An empty allow list means NOBODY: deny lists only subtract from
+        what the allow lists have granted, they never open anything up on their own.
+
+      # --- connection -------------------------------------------------------
       enabled: Enable Claude replies
       enabled_help: >-
-        Master switch. While off, nothing is queued and nothing is billed. Note the
-        API key is NOT set here — put it in config.php as
-        'claude_reply' => ['api_key' => 'sk-ant-...'].
+        Master switch. While off, nothing is queued and nothing is billed. A working queue
+        driver is also required — this extension refuses to run on the sync queue, because a
+        reply takes far longer than a web request should.
 
-      bot_username: Bot account username
-      bot_username_help: >-
-        The forum account Claude posts as. Mentioning this account is what triggers a
-        reply. The account needs Reply permission in the allowed tags, and must not be
-        in a group whose posts require approval.
+      api_key: Anthropic API key
+      api_key_help: >-
+        Only needed if you have not put the key in config.php. A key in config.php (or in the
+        ANTHROPIC_API_KEY environment variable) always wins over this field, and is the safer
+        place for it: a key saved here is stored in the settings table, so it ends up in your
+        database backups and in your settings cache. It is never sent to the browser, and it
+        is never shown again after saving.
+      api_key_stored: A key is stored. Type a new one to replace it, or clear the field to remove it.
+      api_key_overridden: >-
+        A key from {source} is in use and takes precedence — whatever you save here will be
+        ignored until that one is removed.
+      api_key_missing: No key configured. Replies cannot be generated until one is set.
+      api_key_placeholder: sk-ant-...
 
-      allowed_user_ids: Allowed trigger user IDs
-      allowed_user_ids_help: >-
-        Comma-separated user IDs permitted to summon a reply. EMPTY MEANS NOBODY —
-        this is deliberate, so enabling the extension cannot open the bot to the whole
+      bot_account: Bot account
+      bot_account_help: >-
+        The forum account Claude posts as. Mentioning this account is what triggers a reply.
+        It needs Reply permission in the tags it answers in, and it must not be in a group
+        whose posts require approval — otherwise replies are generated, billed, and never
+        appear.
+      bot_account_unset: No account selected — falling back to the username "{username}".
+      bot_account_missing: '"{username}" does not exist on this forum.'
+
+      # --- access -----------------------------------------------------------
+      allowed_users: Allowed members
+      allowed_users_help: >-
+        Members permitted to summon a reply. EMPTY MEANS NOBODY, whatever the groups below
+        say — this is deliberate, so enabling the extension cannot open the bot to the whole
         forum by accident.
+      denied_users: Denied members
+      denied_users_help: >-
+        Members who may never summon a reply, even if they are allowed above or belong to an
+        allowed group. This is the highest-precedence list of all.
 
-      allowed_tag_ids: Allowed tag IDs
-      allowed_tag_ids_help: >-
-        Comma-separated tag IDs the bot will answer in. EMPTY MEANS NO TAG. Every post
-        in an allowed discussion may be sent to Anthropic as context, so opt in per tag
-        deliberately. Private discussions are always refused, regardless of this list.
+      allowed_groups: Allowed groups
+      allowed_groups_help: >-
+        Every member of these groups may summon a reply, unless they are individually denied.
+      denied_groups: Denied groups
+      denied_groups_help: >-
+        Members of these groups may not summon a reply — unless they are individually
+        allowed, which overrides their group.
 
+      allowed_tags: Allowed tags
+      allowed_tags_help: >-
+        Tags the bot will answer in. EMPTY MEANS NO TAG. Every post in an answered discussion
+        may be sent to Anthropic as context, so opt in per tag deliberately. Selecting a
+        parent tag covers its children, because a discussion in a child tag carries the
+        parent too. Private discussions are always refused, whatever is listed here.
+      denied_tags: Denied tags
+      denied_tags_help: >-
+        Tags the bot will never answer in. One denied tag on a discussion is enough to refuse
+        it, even if another of its tags is allowed.
+
+      # --- limits -----------------------------------------------------------
+      per_user_daily_limit: Replies per member per 24 hours
+      per_user_daily_limit_help: >-
+        How many replies one member may summon in a rolling 24-hour window. Set to 0 for no
+        per-member limit. When a member is out, the composer warns them before they post and
+        no reply is generated — they can still post, they just will not get an answer.
+        Groups granted "Bypass the per-member Claude reply limit" under Permissions ignore
+        this (admins always do); the forum-wide limit below still applies to everyone.
+      daily_reply_limit: Replies per 24 hours (whole forum)
+      daily_reply_limit_help: >-
+        Forum-wide spend ceiling over a rolling 24-hour window. Unlike the per-member limit,
+        0 here blocks all replies.
+
+      # --- model ------------------------------------------------------------
       model: Model
       model_help: Model ID passed to the Messages API. Default claude-opus-5.
+      model_loading: Loading available models…
+      model_refresh: Refresh list
+      model_custom: Enter a model ID manually
+      model_choose: Choose from your account's models
+      model_unavailable: >-
+        Could not load the model list ({error}) — enter a model ID manually.
+      model_no_key: Add an API key to load the list of models your account can use.
+      model_current: 'Currently set: {model}'
+      model_effort_unsupported: >-
+        This model does not support the effort setting; it will be ignored.
 
       effort: Effort
       effort_help: >-
-        Controls how much the model thinks and spends. Forum replies rarely need more
-        than medium; raise it if answers feel shallow.
+        Controls how much the model thinks and spends. Forum replies rarely need more than
+        medium; raise it if answers feel shallow.
 
       max_tokens: Max response tokens
       max_tokens_help: >-
-        Hard ceiling on the response INCLUDING thinking tokens. Sizing this to the
-        visible answer alone will truncate replies mid-sentence.
+        Hard ceiling on the response INCLUDING thinking tokens. Sizing this to the visible
+        answer alone will truncate replies mid-sentence.
 
       context_token_budget: Context token budget
       context_token_budget_help: >-
@@ -46,22 +123,6 @@ ekumanov-claude-reply:
       max_context_posts: Max context posts
       max_context_posts_help: Hard cap on posts pulled into context, whatever the token budget allows.
 
-      daily_reply_limit: Replies per 24 hours
-      daily_reply_limit_help: >-
-        Forum-wide spend ceiling over a rolling 24-hour window. Set to 0 to block all
-        replies.
-
-      persona_prompt: Persona / house style
-      persona_prompt_help: >-
-        Appended to the built-in system prompt. Describe the community, the audience,
-        the tone and the language you want. Output format and safety rules are already
-        handled; use this for voice.
-
-      footer: Reply footer
-      footer_help: >-
-        Markdown appended to every reply — typically an AI-disclosure line. Leave empty
-        to disable.
-
       web_search: Allow web search
       web_search_help: >-
         Lets Claude run server-side web searches while composing a reply, rather than
@@ -69,3 +130,42 @@ ekumanov-claude-reply:
 
       web_search_max_uses: Max searches per reply
       web_search_max_uses_help: Caps searches for a single reply.
+
+      # --- voice ------------------------------------------------------------
+      persona_prompt: Persona / house style
+      persona_prompt_help: >-
+        Appended to the built-in system prompt. Describe the community, the audience, the tone
+        and the language you want. Output format, quoting rules and safety rules are already
+        handled; use this for voice.
+
+      footer: Reply footer
+      footer_help: >-
+        Markdown appended to every reply — typically an AI-disclosure line. Leave empty to
+        disable.
+
+    # --- shared picker UI ---------------------------------------------------
+    picker:
+      search_users: Search members by name…
+      search_tags: Search tags…
+      search_groups: Search groups…
+      no_results: No matches
+      empty_users: No members selected
+      empty_tags: No tags selected
+      empty_groups: No groups selected
+      remove: Remove
+      searching: Searching…
+      unknown_user: 'Unknown member (id {id})'
+      unknown_tag: 'Unknown tag (id {id})'
+      unknown_group: 'Unknown group (id {id})'
+
+  forum:
+    quota:
+      title: No Claude reply for this post
+      exhausted_one: >-
+        You have used your one Claude reply for today, so mentioning {bot} in this post will
+        not produce an answer. You can still post it.
+      exhausted_many: >-
+        You have used all {limit} of your Claude replies for the last 24 hours, so mentioning
+        {bot} in this post will not produce an answer. You can still post it.
+      post_anyway: Post anyway
+      cancel: Back to editing

@@ -31,6 +31,56 @@ final readonly class DiscussionContext
     }
 
     /**
+     * Ids of the posts the model was actually shown — the only posts it may
+     * legitimately quote or link to.
+     *
+     * @return list<int>
+     */
+    public function postIds(): array
+    {
+        return array_values(array_map(fn (ContextPost $p) => $p->id, $this->posts));
+    }
+
+    /**
+     * Ids of the people the model was shown — the only members it may
+     * legitimately @-mention. Anyone else it names would be a member who never
+     * took part in this discussion receiving a notification about it.
+     *
+     * @return list<int>
+     */
+    public function authorIds(): array
+    {
+        $ids = [];
+
+        foreach ($this->posts as $post) {
+            if ($post->authorId !== null) {
+                $ids[] = $post->authorId;
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    /**
+     * Usernames of those same people, lowercased, for validating the bare
+     * `@username` mention form.
+     *
+     * @return list<string>
+     */
+    public function authorUsernames(): array
+    {
+        $names = [];
+
+        foreach ($this->posts as $post) {
+            if ($post->authorUsername !== null && $post->authorUsername !== '') {
+                $names[] = strtolower($post->authorUsername);
+            }
+        }
+
+        return array_values(array_unique($names));
+    }
+
+    /**
      * Flatten to the single user-turn string.
      *
      * The gap marker matters: without it a model handed posts #1 then #180

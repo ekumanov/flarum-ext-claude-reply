@@ -3,15 +3,18 @@
 namespace Ekumanov\ClaudeReply\Listener;
 
 use Carbon\Carbon;
+use Ekumanov\ClaudeReply\Access\Reason;
+use Ekumanov\ClaudeReply\Access\ReplyQuota;
+use Ekumanov\ClaudeReply\Access\TriggerGate;
 use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Job\GenerateReplyJob;
 use Ekumanov\ClaudeReply\ReplyLog;
 use Ekumanov\ClaudeReply\Settings\ApiKey;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
-use Flarum\Extension\ExtensionManager;
 use Flarum\Post\CommentPost;
 use Flarum\Post\Event\Posted;
 use Flarum\Queue\RoutingQueue;
+use Flarum\User\User;
 use Illuminate\Contracts\Queue\Queue;
 use Illuminate\Queue\SyncQueue;
 use Psr\Log\LoggerInterface;
@@ -22,19 +25,35 @@ use Throwable;
  * Decides whether a newly posted comment should get a Claude reply, and if so
  * queues one.
  *
- * This runs INSIDE the post-save HTTP request, so it does no network I/O: it
- * reads settings, runs a handful of cheap checks, writes one audit row and
- * pushes a job. Everything expensive is the worker's problem.
+ * This runs INSIDE the post-save HTTP request, on every post the forum
+ * receives, so what it costs matters more than what it does. It performs no
+ * network I/O, and the gate order below is arranged so that an ordinary post —
+ * the overwhelming majority — is rejected without touching the database at
+ * all:
  *
- * Gate order is cheapest-first and fail-closed at every step. Two independent
- * guards stop a reply loop: the bot's own user id is never in the allow-list,
- * and it is additionally rejected by name below. Note also that the *trigger*
- * is a mention of the bot, so even a reply that @-mentions a human can't
- * bounce back.
+ *   1. `enabled` (memoised settings read)
+ *   2. an actor exists
+ *   3. the post's XML contains a user mention AT ALL — a substring test on a
+ *      string already in memory. This is the short-circuit that matters: a
+ *      post with no `@` in it never gets further, so the steady-state cost of
+ *      having this extension installed is one settings lookup and one
+ *      `str_contains`.
+ *   4. the user/group gate (array work; one query only if group lists are in
+ *      use)
+ *   5. the bot account (first query — memoised per process), self-trigger
+ *      guard, and whether the mention is actually OF the bot
+ *   6. API key, private-discussion refusal, tag gate
+ *   7. quotas (per member, then forum-wide)
+ *   8. queue driver sanity, then one audit row and one job push
  *
- * Deliberately NOT hooked to `Revised`. Editing a post to add the mention
- * would otherwise let one post bill repeatedly, and an edit-triggered reply
- * appears out of order in the thread.
+ * Every step is fail-closed. Two independent guards stop a reply loop: the bot
+ * is not normally on any allow-list, and it is additionally rejected by id in
+ * step 5. Note also that the *trigger* is a mention of the bot, so even a reply
+ * that @-mentions a human cannot bounce back.
+ *
+ * Deliberately NOT hooked to `Revised`. Editing a post to add the mention would
+ * otherwise let one post bill repeatedly, and an edit-triggered reply appears
+ * out of order in the thread.
  */
 final class HandleMention
 {
@@ -42,7 +61,8 @@ final class HandleMention
         private readonly SettingsRepository $settings,
         private readonly ApiKey $apiKey,
         private readonly BotAccount $bot,
-        private readonly ExtensionManager $extensions,
+        private readonly TriggerGate $gate,
+        private readonly ReplyQuota $quota,
         private readonly Queue $queue,
         private readonly LoggerInterface $log,
     ) {}
@@ -50,7 +70,7 @@ final class HandleMention
     public function handle(Posted $event): void
     {
         try {
-            $this->maybeQueue($event->post, $event->actor?->id);
+            $this->maybeQueue($event->post, $event->actor);
         } catch (Throwable $e) {
             // A failure here must never break posting. The user's post is
             // already saved; the reply is best-effort.
@@ -61,46 +81,61 @@ final class HandleMention
         }
     }
 
-    private function maybeQueue(CommentPost $post, ?int $actorId): void
+    private function maybeQueue(CommentPost $post, ?User $actor): void
     {
         if (! $this->settings->enabled()) {
             return;
         }
 
-        if ($actorId === null) {
+        if ($actor === null || $actor->id === null) {
             return;
         }
 
-        // Guard 1: the bot must never trigger itself.
-        $botId = $this->bot->id();
-        if ($botId === null) {
-            $this->log->warning('claude-reply: bot account not found', [
-                'username' => $this->settings->botUsername(),
-            ]);
+        $actorId = (int) $actor->id;
+
+        // Cheapest possible rejection, and the one that runs for nearly every
+        // post on the forum: no user mention in the stored XML means this post
+        // cannot be a trigger, whoever wrote it. No query, no parsing.
+        $xml = (string) $post->parsed_content;
+
+        if (! str_contains($xml, '<USERMENTION')) {
             return;
         }
+
+        $decision = $this->gate->user($actor);
+
+        if (! $decision->allowed) {
+            return;
+        }
+
+        $botId = $this->bot->id();
+
+        if ($botId === null) {
+            $this->log->warning('claude-reply: bot account not found', [
+                'bot_user_id' => $this->settings->botUserId(),
+                'username' => $this->settings->botUsername(),
+            ]);
+
+            return;
+        }
+
+        // The bot must never trigger itself, even if someone allow-lists it.
         if ($actorId === $botId) {
             return;
         }
 
-        // Guard 2: explicit trigger allow-list. Empty = nobody.
-        $allowed = $this->settings->allowedUserIds();
-        if ($allowed === [] || ! in_array($actorId, $allowed, true)) {
-            return;
-        }
-
-        // Mention check before the API-key check: otherwise every ordinary
-        // post by an allow-listed user logs a key warning.
-        if (! $this->mentionsBot($post, $botId)) {
+        if (! $this->mentionsBot($xml, $botId)) {
             return;
         }
 
         if (! $this->apiKey->isConfigured()) {
-            $this->log->warning('claude-reply: no API key configured (config.php claude_reply.api_key)');
+            $this->log->warning('claude-reply: no API key configured (config.php claude_reply.api_key, ANTHROPIC_API_KEY, or the admin setting)');
+
             return;
         }
 
         $discussion = $post->discussion;
+
         if ($discussion === null) {
             return;
         }
@@ -112,17 +147,33 @@ final class HandleMention
             $this->log->info('claude-reply: refused in private discussion', [
                 'discussion_id' => $discussion->id,
             ]);
+
             return;
         }
 
-        if (! $this->tagAllowed($discussion)) {
+        $tagDecision = $this->gate->discussion($discussion);
+
+        if (! $tagDecision->allowed) {
             return;
         }
 
-        if ($this->dailyLimitReached()) {
-            $this->log->warning('claude-reply: daily reply limit reached', [
-                'limit' => $this->settings->dailyReplyLimit(),
+        $quotaDecision = $this->quota->check($actor);
+
+        if (! $quotaDecision->allowed) {
+            // Worth a log line at warning level: unlike the gates above, this
+            // is a member who was entitled to a reply and did not get one. The
+            // composer warns them before they post, but the warning is
+            // advisory and this is the authoritative refusal.
+            $this->log->warning('claude-reply: refused, quota reached', [
+                'reason' => $quotaDecision->reason->value,
+                'user_id' => $actorId,
+                'post_id' => $post->id,
+                'per_user_limit' => $this->settings->perUserDailyLimit(),
+                'forum_limit' => $this->settings->dailyReplyLimit(),
             ]);
+
+            $this->recordSkip($post, $actorId, $quotaDecision->reason);
+
             return;
         }
 
@@ -131,12 +182,13 @@ final class HandleMention
         // composer hang, and PHP would likely hit max_execution_time first.
         // Refuse rather than degrade. Unlike link-preview there is no
         // scheduled sweep to fall back on, and inventing one for a feature
-        // only an allow-listed admin can trigger is not worth the cron
+        // only an allow-listed member can trigger is not worth the cron
         // dependency: configure a real queue driver instead.
         if ($this->isSyncQueue()) {
             $this->log->warning(
                 'claude-reply: refusing to run on the sync queue — configure a queue driver (redis/database) and run a worker'
             );
+
             return;
         }
 
@@ -154,55 +206,44 @@ final class HandleMention
     }
 
     /**
-     * True when the post's TextFormatter XML carries a USERMENTION pointing at
-     * the bot. Reading the parsed attribute rather than string-matching the
-     * raw body means a code block containing `@claude_user`, or a nickname
-     * change, can't produce a false positive.
+     * Leave a trace of a quota refusal.
      *
-     * NB `$post->content` is NOT the XML — the HasFormattedContent accessor
-     * unparses it back to source on read. `parsed_content` is the stored XML.
+     * Written as `skipped`, which by definition does not count against either
+     * cap — nothing was billed. Without this the ledger would show a member's
+     * replies simply stopping, with no record of the attempts that were turned
+     * away, and "why did the bot ignore me at 3pm" would be unanswerable.
      */
-    private function mentionsBot(CommentPost $post, int $botId): bool
+    private function recordSkip(CommentPost $post, int $actorId, Reason $reason): void
     {
-        $content = (string) $post->parsed_content;
-        if ($content === '') {
-            return false;
-        }
+        $row = new ReplyLog();
+        $row->discussion_id   = $post->discussion_id;
+        $row->trigger_post_id = $post->id;
+        $row->trigger_user_id = $actorId;
+        $row->status          = ReplyLog::STATUS_SKIPPED;
+        $row->error           = $reason->value;
+        $row->created_at      = Carbon::now();
+        $row->completed_at    = Carbon::now();
+        $row->save();
+    }
 
+    /**
+     * True when the post's TextFormatter XML carries a USERMENTION pointing at
+     * the bot. Reading the parsed attribute rather than string-matching the raw
+     * body means a code block containing `@claude_user`, or a nickname change,
+     * can't produce a false positive.
+     *
+     * NB the XML comes from `parsed_content`, not `content` — the
+     * HasFormattedContent accessor unparses the latter back to source on read.
+     */
+    private function mentionsBot(string $xml, int $botId): bool
+    {
         try {
-            $ids = Utils::getAttributeValues($content, 'USERMENTION', 'id');
+            $ids = Utils::getAttributeValues($xml, 'USERMENTION', 'id');
         } catch (Throwable) {
             return false;
         }
 
         return in_array((string) $botId, array_map('strval', $ids), true);
-    }
-
-    /**
-     * Tag allow-list. Empty = no tag permitted, so enabling the extension
-     * without configuring tags cannot silently expose the whole forum.
-     *
-     * With flarum-tags disabled there are no tags to check against and the
-     * allow-list can never be satisfied — that is intentional.
-     */
-    private function tagAllowed(object $discussion): bool
-    {
-        $allowedTags = $this->settings->allowedTagIds();
-        if ($allowedTags === []) {
-            return false;
-        }
-
-        if (! $this->extensions->isEnabled('flarum-tags')) {
-            return false;
-        }
-
-        try {
-            $tagIds = $discussion->tags->pluck('id')->map('intval')->all();
-        } catch (Throwable) {
-            return false;
-        }
-
-        return array_intersect($tagIds, $allowedTags) !== [];
     }
 
     /**
@@ -222,20 +263,5 @@ final class HandleMention
         }
 
         return $queue instanceof SyncQueue;
-    }
-
-    private function dailyLimitReached(): bool
-    {
-        $limit = $this->settings->dailyReplyLimit();
-        if ($limit <= 0) {
-            return true;
-        }
-
-        $used = ReplyLog::query()
-            ->where('created_at', '>=', Carbon::now()->subDay())
-            ->where('status', '!=', ReplyLog::STATUS_SKIPPED)
-            ->count();
-
-        return $used >= $limit;
     }
 }

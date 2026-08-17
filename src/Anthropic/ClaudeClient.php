@@ -53,6 +53,42 @@ final class ClaudeClient
         )->inputTokens;
     }
 
+    /**
+     * The models this key can call, newest first.
+     *
+     * Returned as plain arrays rather than SDK objects because the only caller
+     * serialises straight to JSON for the admin dropdown. `maxTokens` comes
+     * along so the UI can tell an admin that their `max_tokens` exceeds what
+     * the chosen model accepts, and the effort flag because not every model
+     * supports the `effort` parameter this extension sends.
+     *
+     * @return list<array{id: string, name: string, maxTokens: int|null, maxInputTokens: int|null, effort: bool}>
+     */
+    public function listModels(): array
+    {
+        $page = $this->client()->models->list(
+            limit: 100,
+            requestOptions: ['timeout' => 20.0],
+        );
+
+        $models = [];
+
+        // getItems(), not foreach: iterating a Page yields successive *pages*
+        // and walks the whole cursor, which would turn one request into as many
+        // as the account has models.
+        foreach ($page->getItems() as $model) {
+            $models[] = [
+                'id' => $model->id,
+                'name' => $model->displayName,
+                'maxTokens' => $model->maxTokens,
+                'maxInputTokens' => $model->maxInputTokens,
+                'effort' => $model->capabilities?->effort->supported ?? false,
+            ];
+        }
+
+        return $models;
+    }
+
     public function reply(string $forumTitle, string $botName, string $context): ReplyResult
     {
         $tools = null;

@@ -1,0 +1,15 @@
+// The quota warning modal is the only forum-side UI, and it is deliberately
+// almost unstyled — core's Modal supplies everything except the button row.
+
+.ClaudeReply-quotaActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 15px;
+
+  // "Back to editing" is the primary button and comes first: a member who
+  // opened this dialog by accident should land on the reversible choice.
+  .Button {
+    flex: 1 1 auto;
+  }
+}

@@ -120,14 +120,38 @@ final class ContextBuilder
 
     private function toContextPost(Post $post, ?int $firstPostId, int $triggerId): ContextPost
     {
+        $author = $post->user;
+
         return new ContextPost(
+            id: (int) $post->id,
             number: (int) $post->number,
-            author: $post->user?->display_name ?? '[deleted user]',
+            author: $this->mentionSafeName($author?->display_name ?? '[deleted user]'),
+            authorId: $author?->id !== null ? (int) $author->id : null,
+            authorUsername: $author?->username,
             createdAt: $post->created_at?->toDateString() ?? '',
             text: $this->unparse($post),
             isOpeningPost: $firstPostId !== null && $post->id === $firstPostId,
             isTrigger: $post->id === $triggerId,
         );
+    }
+
+    /**
+     * Make a display name safe to embed in a mention token.
+     *
+     * flarum/mentions matches `@"name"#p123` with a name pattern that
+     * explicitly cannot contain `"#` followed by an id (it is how the parser
+     * finds the end of the name), and core's own unparser rewrites such names
+     * before emitting a token. A nickname containing `"#12` would otherwise
+     * produce a token that parses at the wrong boundary, so apply the same
+     * substitution core does.
+     */
+    private function mentionSafeName(string $name): string
+    {
+        if (! str_contains($name, '"#')) {
+            return $name;
+        }
+
+        return (string) preg_replace('/"#[a-z]{0,3}[0-9]+/', '_', $name);
     }
 
     /**

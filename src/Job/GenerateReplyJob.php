@@ -7,6 +7,7 @@ use Ekumanov\ClaudeReply\Anthropic\ClaudeClient;
 use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Context\ContextBuilder;
 use Ekumanov\ClaudeReply\PostPublisher;
+use Ekumanov\ClaudeReply\Reply\MentionSanitizer;
 use Ekumanov\ClaudeReply\ReplyLog;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 use Flarum\Post\CommentPost;
@@ -45,6 +46,7 @@ class GenerateReplyJob extends AbstractJob
         ClaudeClient $claude,
         PostPublisher $publisher,
         BotAccount $bot,
+        MentionSanitizer $sanitizer,
         SettingsRepository $settings,
         SettingsRepositoryInterface $rawSettings,
         LoggerInterface $log,
@@ -56,7 +58,7 @@ class GenerateReplyJob extends AbstractJob
         }
 
         try {
-            $this->run($row, $contextBuilder, $claude, $publisher, $bot, $settings, $rawSettings, $log);
+            $this->run($row, $contextBuilder, $claude, $publisher, $bot, $sanitizer, $settings, $rawSettings, $log);
         } catch (Throwable $e) {
             $this->markFailed($row, substr($e->getMessage(), 0, 250));
 
@@ -74,6 +76,7 @@ class GenerateReplyJob extends AbstractJob
         ClaudeClient $claude,
         PostPublisher $publisher,
         BotAccount $bot,
+        MentionSanitizer $sanitizer,
         SettingsRepository $settings,
         SettingsRepositoryInterface $rawSettings,
         LoggerInterface $log,
@@ -149,6 +152,20 @@ class GenerateReplyJob extends AbstractJob
                 'max_tokens' => $settings->maxTokens(),
             ]);
         }
+
+        // Validate mention tokens against what the model was actually shown,
+        // BEFORE the footer is appended — the footer is the admin's own text
+        // and is not the model's to be held to.
+        $sanitized = $sanitizer->sanitize($text, $context);
+
+        if ($sanitized->changed()) {
+            $log->warning('claude-reply: stripped mention tokens the model was not shown', [
+                'log_id' => $row->id,
+                'stripped' => $sanitized->summary(),
+            ]);
+        }
+
+        $text = $sanitized->text;
 
         $footer = $settings->footer();
         if ($footer !== '') {

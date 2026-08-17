@@ -2,6 +2,8 @@
 
 namespace Ekumanov\ClaudeReply\Console;
 
+use Ekumanov\ClaudeReply\Access\ReplyQuota;
+use Ekumanov\ClaudeReply\Access\TriggerGate;
 use Ekumanov\ClaudeReply\Anthropic\ClaudeClient;
 use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Context\ContextBuilder;
@@ -10,6 +12,7 @@ use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 use Flarum\Post\CommentPost;
 use Flarum\Settings\SettingsRepositoryInterface;
 use Illuminate\Console\Command;
+use s9e\TextFormatter\Utils;
 
 /**
  * Dry-run harness: `php flarum claude-reply:test <postId>`.
@@ -26,15 +29,18 @@ class TestReplyCommand extends Command
 {
     protected $signature = 'claude-reply:test
                             {post : ID of a post to treat as the trigger}
-                            {--send : Actually call the API and print the reply (still does not post it)}';
+                            {--send : Actually call the API and print the reply (still does not post it)}
+                            {--gate : Only report the gate decision, do not build the context}';
 
-    protected $description = 'Preview the discussion context (and optionally the generated reply) for a given trigger post, without posting.';
+    protected $description = 'Explain the gate decision for a post, preview the discussion context, and optionally the generated reply — without posting.';
 
     public function handle(
         ContextBuilder $contextBuilder,
         ClaudeClient $claude,
         BotAccount $bot,
         ApiKey $apiKey,
+        TriggerGate $gate,
+        ReplyQuota $quota,
         SettingsRepository $settings,
         SettingsRepositoryInterface $rawSettings,
     ): int {
@@ -46,6 +52,12 @@ class TestReplyCommand extends Command
         if ($post === null) {
             $this->error("No comment post with id {$postId}.");
             return 1;
+        }
+
+        $this->explainGate($post, $bot, $apiKey, $gate, $quota, $settings);
+
+        if ($this->option('gate')) {
+            return 0;
         }
 
         $botUser = $bot->get();
@@ -117,5 +129,83 @@ class TestReplyCommand extends Command
         }
 
         return 0;
+    }
+
+    /**
+     * Walk the same gates the listener walks and print the verdict for each.
+     *
+     * The question this answers is "why did the bot not reply to that post?",
+     * which used to be answerable only by reading the listener with the settings
+     * table open alongside it. With allow and deny lists across three
+     * categories, plus two quotas, that stopped being reasonable.
+     *
+     * Note this reports on the post's *author* as the would-be trigger, and
+     * that it evaluates current settings — not the state at the time the post
+     * was made.
+     */
+    private function explainGate(
+        CommentPost $post,
+        BotAccount $bot,
+        ApiKey $apiKey,
+        TriggerGate $gate,
+        ReplyQuota $quota,
+        SettingsRepository $settings,
+    ): void {
+        $this->info('=== GATE ===');
+
+        $author = $post->user;
+        $botId = $bot->id();
+        $rows = [];
+
+        $rows[] = ['enabled', $settings->enabled() ? 'yes' : 'NO — nothing is queued'];
+        $rows[] = ['api key', $apiKey->isConfigured() ? 'yes (from '.$apiKey->source().')' : 'NO'];
+        $rows[] = ['bot account', $botId === null
+            ? 'NOT FOUND ('.($settings->botUserId() ?? $settings->botUsername()).')'
+            : $bot->username().' (id '.$botId.')'];
+
+        if ($author === null) {
+            $rows[] = ['post author', 'MISSING — cannot evaluate the user gate'];
+        } else {
+            $decision = $gate->user($author);
+            $rows[] = ['post author', $author->username.' (id '.$author->id.')'];
+            $rows[] = ['user gate', ($decision->allowed ? 'ALLOW' : 'DENY').' — '.$decision->reason->value];
+        }
+
+        $mentionsBot = $botId !== null && str_contains((string) $post->parsed_content, '<USERMENTION')
+            && in_array(
+                (string) $botId,
+                array_map('strval', Utils::getAttributeValues((string) $post->parsed_content, 'USERMENTION', 'id')),
+                true
+            );
+
+        $rows[] = ['mentions the bot', $mentionsBot ? 'yes' : 'no — this post would not be a trigger'];
+
+        $discussion = $post->discussion;
+
+        if ($discussion === null) {
+            $rows[] = ['discussion', 'MISSING'];
+        } else {
+            $tagDecision = $gate->discussion($discussion);
+            $rows[] = ['private discussion', $discussion->is_private ? 'YES — always refused' : 'no'];
+            $rows[] = ['tag gate', ($tagDecision->allowed ? 'ALLOW' : 'DENY').' — '.$tagDecision->reason->value];
+        }
+
+        if ($author !== null) {
+            $perUser = $settings->perUserDailyLimit();
+            $used = $quota->userUsed((int) $author->id);
+
+            $rows[] = ['author usage (24h)', match (true) {
+                $quota->mayBypass($author) => $used.' (exempt from the per-user limit)',
+                $perUser > 0 => $used.' of '.$perUser,
+                default => $used.' (no per-user limit)',
+            }];
+            $rows[] = ['forum usage (24h)', $quota->forumUsed().' of '.$settings->dailyReplyLimit()];
+
+            $quotaDecision = $quota->check($author);
+            $rows[] = ['quota', ($quotaDecision->allowed ? 'ALLOW' : 'DENY').' — '.$quotaDecision->reason->value];
+        }
+
+        $this->table(['check', 'result'], $rows);
+        $this->newLine();
     }
 }

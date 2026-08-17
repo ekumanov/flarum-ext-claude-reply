@@ -1,0 +1,181 @@
+// Admin styles for the pickers and status notes.
+//
+// Everything here builds on Flarum's own variables rather than fixed colours, so
+// the settings page stays legible in a dark admin theme without a second
+// palette to maintain.
+
+.ClaudeReply-section {
+  margin: 30px 0 5px;
+  padding-top: 15px;
+  border-top: 1px solid var(--control-bg);
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted-color);
+
+  // The first heading opens the page; a rule above it would float in space.
+  &:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+}
+
+.ClaudeReply-note {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--border-radius);
+  border-left: 3px solid var(--muted-color);
+  background: var(--control-bg);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-color);
+
+  &--info {
+    border-left-color: var(--primary-color);
+  }
+
+  &--ok {
+    border-left-color: var(--success-color, #4a9d5f);
+  }
+
+  &--warn {
+    border-left-color: var(--alert-warning-color, #d99a41);
+    color: var(--text-color);
+  }
+}
+
+.ClaudeReply-picker {
+  margin-top: 6px;
+}
+
+.ClaudeReply-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+  min-height: 22px;
+  align-items: center;
+}
+
+.ClaudeReply-chipsEmpty {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted-color);
+}
+
+.ClaudeReply-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 4px 3px 8px;
+  border-radius: 11px;
+  background: var(--control-bg);
+  color: var(--control-color);
+  font-size: 12px;
+  line-height: 16px;
+
+  // A chip for an id that no longer resolves — a deleted member, a removed tag.
+  // Shown rather than dropped, because a stale id is still enforced server-side
+  // and the admin needs to be able to see it to remove it.
+  &--unknown {
+    background: var(--alert-warning-bg, fade(#d99a41, 20%));
+  }
+
+  .icon {
+    font-size: 11px;
+    opacity: 0.7;
+  }
+}
+
+.ClaudeReply-chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ClaudeReply-chipAvatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.ClaudeReply-chipSwatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ClaudeReply-chipRemove.Button--link {
+  padding: 0 4px;
+  min-height: 0;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.6;
+
+  &:hover,
+  &:focus {
+    opacity: 1;
+  }
+}
+
+.ClaudeReply-pickerInput {
+  max-width: 320px;
+}
+
+// Results render inline below the input instead of in a floating dropdown: no
+// positioning to get wrong, and nothing to be clipped by the settings page's
+// scroll container.
+.ClaudeReply-results {
+  margin-top: 4px;
+  max-width: 320px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--control-bg);
+  border-radius: var(--border-radius);
+}
+
+.ClaudeReply-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: none;
+  color: var(--text-color);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover,
+  &:focus {
+    background: var(--control-bg);
+  }
+
+  & + & {
+    border-top: 1px solid var(--control-bg);
+  }
+}
+
+.ClaudeReply-resultsEmpty {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted-color);
+}
+
+.ClaudeReply-fieldActions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+
+  .Button--link {
+    padding: 2px 6px;
+    font-size: 12px;
+  }
+}
