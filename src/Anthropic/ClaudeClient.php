@@ -65,20 +65,12 @@ final class ClaudeClient
     private const MIN_CONTINUATION_SECONDS = 45.0;
 
     /**
-     * Most API calls one reply may cost, continuations included.
+     * Floor under the call backstop; see {@see maxCalls()} for the rest.
      *
-     * A backstop, not the working limit. The budget that should actually
-     * govern a thorough reply is `forum_search_max_uses`, and at 4 this bound
-     * silently overruled it: a search, a read and a search is three lookups
-     * and four calls, so the fourth request tripped this before the setting
-     * ever applied, and raising the setting above three did nothing at all.
-     *
-     * Six leaves room for the configured number of lookups plus the call that
-     * writes the answer, which puts the setting back in charge and leaves
-     * TOTAL_BUDGET_SECONDS as the bound that really protects the queue — a
-     * wall clock is a truer measure of a runaway turn than a call count.
+     * Enough on its own for a turn with no client tools, where the only thing
+     * that can extend it is a pause.
      */
-    private const MAX_CALLS = 6;
+    private const CALL_FLOOR = 6;
 
     public function __construct(
         private readonly ApiKey $apiKey,
@@ -186,6 +178,7 @@ final class ClaudeClient
             }
         }
 
+        $maxCalls = $this->maxCalls($forumTools);
         $system   = $this->systemPrompt->build($forumTitle, $botName, $forumTools);
         $messages = [['role' => 'user', 'content' => $this->firstMessage($context, $tools !== [])]];
         $deadline = microtime(true) + self::TOTAL_BUDGET_SECONDS;
@@ -237,7 +230,7 @@ final class ClaudeClient
                 break;
             }
 
-            if ($calls >= self::MAX_CALLS
+            if ($calls >= $maxCalls
                 || $deadline - microtime(true) < self::MIN_CONTINUATION_SECONDS) {
                 // Out of budget. A paused turn is simply unfinished, but a
                 // turn waiting on tools cannot be left that way: the API
@@ -344,6 +337,30 @@ final class ClaudeClient
             webSearchRequests: $webSearches,
             forumSearches: $forumSearches,
         );
+    }
+
+    /**
+     * The backstop on how many calls one reply may cost.
+     *
+     * Derived, not fixed, because a constant here has already overruled the
+     * setting once: at four it capped the lookup budget at three no matter
+     * what an admin configured, and the setting quietly meant nothing. Any
+     * fixed number does that again the moment somebody raises the budget past
+     * it, so the backstop tracks the budget instead — the configured lookups,
+     * plus room for the call that writes the answer and one to spare.
+     *
+     * It stays a backstop rather than becoming the limit. The bound that
+     * actually protects the queue is TOTAL_BUDGET_SECONDS: a wall clock is a
+     * truer measure of a runaway turn than a count of calls, and it is the one
+     * that has to fit inside the job's own timeout.
+     */
+    private function maxCalls(bool $forumTools): int
+    {
+        if (! $forumTools) {
+            return self::CALL_FLOOR;
+        }
+
+        return max(self::CALL_FLOOR, $this->settings->forumSearchMaxUses() + 2);
     }
 
     /**
