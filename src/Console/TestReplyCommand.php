@@ -115,6 +115,9 @@ class TestReplyCommand extends Command
 
         $this->line('stop_reason    : '.($result->stopReason ?? 'null'));
         $this->line('tokens in/out  : '.$result->inputTokens.' / '.$result->outputTokens);
+        if ($result->apiCalls > 1) {
+            $this->line('api calls      : '.$result->apiCalls.' (the turn paused and was continued)');
+        }
         if ($result->webSearchRequests > 0) {
             $this->line('web searches   : '.$result->webSearchRequests);
         }
@@ -122,6 +125,14 @@ class TestReplyCommand extends Command
 
         if ($result->isRefusal()) {
             $this->error('Model declined the request (stop_reason: refusal).');
+            return 1;
+        }
+
+        if ($result->isIncomplete()) {
+            $this->error('Model never finished its turn (stop_reason: '.($result->stopReason ?? 'null').').');
+            $this->line('What it had written is below, but it is a fragment, not a reply — the job would refuse to post it.');
+            $this->newLine();
+            $this->line($result->text);
             return 1;
         }
 

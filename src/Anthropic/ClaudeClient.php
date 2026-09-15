@@ -14,19 +14,26 @@ use Symfony\Component\HttpClient\HttpClient as SymfonyHttpClient;
 use Symfony\Component\HttpClient\Psr18Client as SymfonyPsr18Client;
 
 /**
- * Thin wrapper over the Anthropic Messages API for the one call this
- * extension makes.
+ * Thin wrapper over the Anthropic Messages API for the one reply this
+ * extension generates.
  *
  * Deliberately non-streaming: this runs in a queue worker with nobody
- * watching, so there is no partial output to display and a single blocking
- * call is simpler to reason about. `max_tokens` stays well under the level
- * where the SDK would need streaming to dodge HTTP timeouts, and the request
- * timeout is raised to cover a slow thinking turn.
+ * watching, so there is no partial output to display and blocking calls are
+ * simpler to reason about. `max_tokens` stays well under the level where the
+ * SDK would need streaming to dodge HTTP timeouts, and the request timeout is
+ * raised to cover a slow thinking turn.
+ *
+ * One reply is usually one call, but not always: with web search enabled the
+ * API may end a response with `pause_turn`, meaning it suspended a
+ * long-running turn partway through and is waiting to be handed it back. That
+ * is a continuation of the same turn, not a new one — see {@see reply()}.
  *
  * No prompt caching. The system prompt is stable and would be cacheable, but
  * forum mentions arrive minutes or hours apart while the cache TTL is five
  * minutes — writes (1.25x) would almost never be read back (0.1x), so caching
- * here would cost more than it saves.
+ * here would cost more than it saves. (A paused turn resumes within seconds,
+ * so continuations *would* read a cache back; it is only worth the breakpoint
+ * if they ever become common, which so far they are not.)
  */
 final class ClaudeClient
 {
@@ -37,6 +44,25 @@ final class ClaudeClient
      * request option does nothing.
      */
     private const TIMEOUT_SECONDS = 300.0;
+
+    /**
+     * Wall-clock ceiling for the whole exchange, continuations included.
+     *
+     * Has to leave room inside GenerateReplyJob's own 420s timeout for the
+     * token count, the context assembly and the publish. Without this a turn
+     * that paused twice could spend 3x TIMEOUT_SECONDS and be killed by the
+     * queue mid-publish, which is the one failure mode that can double-post.
+     */
+    private const TOTAL_BUDGET_SECONDS = 340.0;
+
+    /**
+     * Never start a continuation with less than this much budget left — an
+     * API call given ten seconds is a wasted API call.
+     */
+    private const MIN_CONTINUATION_SECONDS = 45.0;
+
+    /** Most API calls one reply may cost, continuations included. */
+    private const MAX_CALLS = 4;
 
     public function __construct(
         private readonly ApiKey $apiKey,
@@ -53,14 +79,18 @@ final class ClaudeClient
      */
     public function countTokens(string $forumTitle, string $botName, string $context): int
     {
-        return $this->client()->messages->countTokens(
+        // The SDK's request option is advisory (see transporter()), so the
+        // same figure goes to the transport, which is what actually enforces
+        // it. This one has to stay short: it is spent before the reply budget
+        // starts, and both together must fit inside the queue job's timeout.
+        $timeout = 30.0;
+
+        return $this->client($timeout)->messages->countTokens(
             messages: [['role' => 'user', 'content' => $context]],
             model: $this->settings->model(),
             system: $this->systemPrompt->build($forumTitle, $botName),
             thinking: ['type' => 'adaptive'],
-            // Advisory only (see transporter()); the real ceiling is the
-            // transport's. Kept so the intent is visible at the call site.
-            requestOptions: ['timeout' => 30.0],
+            requestOptions: ['timeout' => $timeout],
         )->inputTokens;
     }
 
@@ -77,9 +107,11 @@ final class ClaudeClient
      */
     public function listModels(): array
     {
-        $page = $this->client()->models->list(
+        $timeout = 20.0;
+
+        $page = $this->client($timeout)->models->list(
             limit: 100,
-            requestOptions: ['timeout' => 20.0],
+            requestOptions: ['timeout' => $timeout],
         );
 
         $models = [];
@@ -100,6 +132,22 @@ final class ClaudeClient
         return $models;
     }
 
+    /**
+     * Generate one reply, continuing the turn if the API pauses it.
+     *
+     * A `pause_turn` stop reason is not a finished response. It means the API
+     * suspended a long-running turn — in practice, one that is working through
+     * server-side web searches — and the turn resumes by sending the assistant
+     * content straight back. Treating it as final publishes whatever preamble
+     * had been written before the pause, which is typically a sentence of
+     * throat-clearing rather than an answer.
+     *
+     * Continuations are bounded three ways (call count, total wall clock, and
+     * a floor under what is left) because the pause can in principle repeat.
+     * When a bound is hit we stop and return with `stopReason` still set to
+     * `pause_turn`, which is how the caller tells an unfinished turn apart
+     * from a finished one — see {@see ReplyResult::isIncomplete()}.
+     */
     public function reply(string $forumTitle, string $botName, string $context): ReplyResult
     {
         $tools = null;
@@ -112,55 +160,104 @@ final class ClaudeClient
             ];
         }
 
-        $message = $this->client()->messages->create(
-            maxTokens: $this->settings->maxTokens(),
-            messages: [['role' => 'user', 'content' => $context]],
-            model: $this->settings->model(),
-            outputConfig: ['effort' => $this->settings->effort()],
-            system: $this->systemPrompt->build($forumTitle, $botName),
-            thinking: ['type' => 'adaptive'],
-            tools: $tools,
-            requestOptions: ['timeout' => self::TIMEOUT_SECONDS],
-        );
+        $system   = $this->systemPrompt->build($forumTitle, $botName);
+        $messages = [['role' => 'user', 'content' => $context]];
+        $deadline = microtime(true) + self::TOTAL_BUDGET_SECONDS;
 
-        return $this->toResult($message);
-    }
+        /** @var list<string> Every text fragment of the turn, in order. */
+        $parts = [];
 
-    private function toResult(Message $message): ReplyResult
-    {
-        $usage = $message->usage;
+        $calls         = 0;
+        $inputTokens   = 0;
+        $outputTokens  = 0;
+        $cacheRead     = 0;
+        $cacheCreation = 0;
+        $webSearches   = 0;
+
+        while (true) {
+            $timeout = min(self::TIMEOUT_SECONDS, max(1.0, $deadline - microtime(true)));
+
+            $message = $this->client($timeout)->messages->create(
+                maxTokens: $this->settings->maxTokens(),
+                messages: $messages,
+                model: $this->settings->model(),
+                outputConfig: ['effort' => $this->settings->effort()],
+                system: $system,
+                thinking: ['type' => 'adaptive'],
+                tools: $tools,
+                requestOptions: ['timeout' => $timeout],
+            );
+
+            $calls++;
+
+            // Usage is per call, so every counter is a running total. The
+            // spend ledger has to bill the whole turn, not just its last leg.
+            $usage = $message->usage;
+
+            $inputTokens   += $usage->inputTokens;
+            $outputTokens  += $usage->outputTokens;
+            $cacheRead     += $usage->cacheReadInputTokens ?? 0;
+            $cacheCreation += $usage->cacheCreationInputTokens ?? 0;
+            $webSearches   += $usage->serverToolUse?->webSearchRequests ?? 0;
+
+            foreach ($this->textParts($message) as $part) {
+                $parts[] = $part;
+            }
+
+            if ($message->stopReason !== 'pause_turn') {
+                break;
+            }
+
+            if ($calls >= self::MAX_CALLS
+                || $deadline - microtime(true) < self::MIN_CONTINUATION_SECONDS) {
+                break;
+            }
+
+            // Hand the paused turn back verbatim. Anything dropped or
+            // reordered here reads to the model as an edit of its own output.
+            $messages[] = ['role' => 'assistant', 'content' => $message->content];
+        }
 
         return new ReplyResult(
-            text: $this->extractText($message),
+            text: trim(implode('', $parts)),
             model: $message->model,
             stopReason: $message->stopReason,
-            inputTokens: $usage->inputTokens,
-            outputTokens: $usage->outputTokens,
-            cacheReadInputTokens: $usage->cacheReadInputTokens ?? 0,
-            cacheCreationInputTokens: $usage->cacheCreationInputTokens ?? 0,
-            webSearchRequests: $usage->serverToolUse?->webSearchRequests ?? 0,
+            apiCalls: $calls,
+            inputTokens: $inputTokens,
+            outputTokens: $outputTokens,
+            cacheReadInputTokens: $cacheRead,
+            cacheCreationInputTokens: $cacheCreation,
+            webSearchRequests: $webSearches,
         );
     }
 
     /**
-     * Concatenate the text blocks.
+     * The text blocks of one message, in order, neither trimmed nor joined.
      *
      * `content` is a heterogeneous list — with thinking on it also carries
      * thinking blocks (empty-texted by default), and with web search enabled
      * it carries server-tool-use and search-result blocks. Only `text` blocks
      * are the reply.
      *
-     * Joined with NOTHING, not a newline. A plain answer arrives as a single
-     * text block, but a cited one — which is what web search produces — is
-     * split at every citation boundary into contiguous prose fragments that
-     * already carry their own spacing:
+     * The caller joins these with NOTHING, not a newline. A plain answer
+     * arrives as a single text block, but a cited one — which is what web
+     * search produces — is split at every citation boundary into contiguous
+     * prose fragments that already carry their own spacing:
      *
      *     "…rated power output of " / "11 W x 2" / ", for a total of 22 watts."
      *
      * Joining those with "\n" injects line breaks mid-sentence, which Markdown
      * then renders as visibly broken text in the posted reply.
+     *
+     * Which is also why the parts are returned raw and the trim happens once,
+     * after the whole turn is assembled: a paused turn splits the reply across
+     * several messages, and that seam lands mid-sentence exactly as a citation
+     * boundary does. Trimming per message would eat the space either side of
+     * it and fuse two words together.
+     *
+     * @return list<string>
      */
-    private function extractText(Message $message): string
+    private function textParts(Message $message): array
     {
         $parts = [];
 
@@ -178,10 +275,10 @@ final class ClaudeClient
             }
         }
 
-        return trim(implode('', $parts));
+        return $parts;
     }
 
-    private function client(): Client
+    private function client(float $timeoutSeconds): Client
     {
         $key = $this->apiKey->get();
 
@@ -191,7 +288,7 @@ final class ClaudeClient
 
         return new Client(
             apiKey: $key,
-            requestOptions: ['transporter' => $this->transporter()],
+            requestOptions: ['transporter' => $this->transporter($timeoutSeconds)],
         );
     }
 
@@ -216,21 +313,25 @@ final class ClaudeClient
      * supported client is installed — cruder, and global for the process, but a
      * queue worker doing one thing at a time can live with it, and it beats
      * inheriting a minute.
+     *
+     * Built per call rather than once, because the ceiling is not the same for
+     * every request: a token count wants seconds, a reply wants minutes, and a
+     * continuation wants only what is left of the turn's budget.
      */
-    private function transporter(): ?ClientInterface
+    private function transporter(float $timeoutSeconds): ?ClientInterface
     {
-        $seconds = (int) ceil(self::TIMEOUT_SECONDS);
+        $seconds = (int) ceil($timeoutSeconds);
 
         if (class_exists(SymfonyPsr18Client::class) && class_exists(SymfonyHttpClient::class)) {
             return new SymfonyPsr18Client(SymfonyHttpClient::create([
-                'timeout' => self::TIMEOUT_SECONDS,
-                'max_duration' => self::TIMEOUT_SECONDS,
+                'timeout' => $timeoutSeconds,
+                'max_duration' => $timeoutSeconds,
             ]));
         }
 
         if (class_exists(GuzzleClient::class)) {
             return new GuzzleClient([
-                'timeout' => self::TIMEOUT_SECONDS,
+                'timeout' => $timeoutSeconds,
                 'connect_timeout' => 10.0,
             ]);
         }

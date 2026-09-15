@@ -128,6 +128,7 @@ class GenerateReplyJob extends AbstractJob
         $row->cache_read_input_tokens     = $result->cacheReadInputTokens;
         $row->cache_creation_input_tokens = $result->cacheCreationInputTokens;
         $row->web_search_requests         = $result->webSearchRequests;
+        $row->api_calls                   = $result->apiCalls;
         $row->model                       = $result->model;
         $row->save();
 
@@ -136,6 +137,19 @@ class GenerateReplyJob extends AbstractJob
         if ($result->isRefusal()) {
             $this->markFailed($row, 'model declined (stop_reason: refusal)');
             $log->warning('claude-reply: model refused', ['log_id' => $row->id]);
+            return;
+        }
+
+        // Same trap, different stop reason: a turn that never finished also
+        // returns 200, with whatever prose preceded the stop. Publishing that
+        // posts a fragment under the bot's name.
+        if ($result->isIncomplete()) {
+            $this->markFailed($row, 'unfinished turn (stop_reason: '.($result->stopReason ?? 'null').')');
+            $log->warning('claude-reply: model did not finish its turn', [
+                'log_id' => $row->id,
+                'stop_reason' => $result->stopReason,
+                'api_calls' => $result->apiCalls,
+            ]);
             return;
         }
 
@@ -190,6 +204,7 @@ class GenerateReplyJob extends AbstractJob
             'post_id' => $post->id,
             'in' => $result->inputTokens,
             'out' => $result->outputTokens,
+            'calls' => $result->apiCalls,
         ]);
     }
 
