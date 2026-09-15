@@ -121,6 +121,12 @@ final class ForumSearch
                     sortIsDefault: true,
                 ),
             )->getResults();
+
+            // One query per relation instead of one per result. The tag filter
+            // and the snippet both reach through a relation on every hit, and
+            // with a dozen results over-fetched fourfold that is a hundred
+            // stray queries on a page the member is waiting for.
+            $results->load(['user', 'firstPost', 'tags']);
         } catch (Throwable $e) {
             return 'The forum search failed: '.$e->getMessage();
         }
@@ -261,6 +267,17 @@ final class ForumSearch
         return "## Post #{$post->number} — {$author}, {$date}\n{$body}";
     }
 
+    /**
+     * One search result.
+     *
+     * The starter's name earns its place: without it the model can only infer
+     * whose thread this is from whose argument it finds inside, and it will —
+     * a live reply described a thread as "PASHKULI's light-action thread" when
+     * peterws had started it and PASHKULI had merely replied. The substance was
+     * right and the possessive was wrong, which is exactly the error a named
+     * member notices. The reader labels every post with its author; a citation
+     * made from a headline alone had nothing to go on.
+     */
     private function headline(Discussion $discussion): string
     {
         $bits = [
@@ -269,7 +286,10 @@ final class ForumSearch
         ];
 
         if ($discussion->created_at !== null) {
-            $bits[] = 'started '.$discussion->created_at->toDateString();
+            $starter = $discussion->user?->display_name;
+
+            $bits[] = 'started '.$discussion->created_at->toDateString()
+                .($starter !== null ? ' by '.$starter : '');
         }
 
         if ($discussion->last_posted_at !== null) {
