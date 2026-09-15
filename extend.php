@@ -2,6 +2,7 @@
 
 use Ekumanov\ClaudeReply\Api\Controller\ListModelsController;
 use Ekumanov\ClaudeReply\Api\ForumAttributes;
+use Ekumanov\ClaudeReply\Console\SearchCommand;
 use Ekumanov\ClaudeReply\Console\TestReplyCommand;
 use Ekumanov\ClaudeReply\Listener\HandleMention;
 use Ekumanov\ClaudeReply\Settings\ApiKey;
@@ -73,5 +74,6 @@ return [
      */
 
     (new Extend\Console())
-        ->command(TestReplyCommand::class),
+        ->command(TestReplyCommand::class)
+        ->command(SearchCommand::class),
 ];

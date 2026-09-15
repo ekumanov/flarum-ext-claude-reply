@@ -111,15 +111,18 @@ class TestReplyCommand extends Command
         $this->newLine();
         $this->info('=== CALLING API ===');
 
-        $result = $claude->reply($forumTitle, $botName, $rendered);
+        $result = $claude->reply($forumTitle, $botName, $rendered, (int) $post->discussion_id);
 
         $this->line('stop_reason    : '.($result->stopReason ?? 'null'));
         $this->line('tokens in/out  : '.$result->inputTokens.' / '.$result->outputTokens);
         if ($result->apiCalls > 1) {
-            $this->line('api calls      : '.$result->apiCalls.' (the turn paused and was continued)');
+            $this->line('api calls      : '.$result->apiCalls.' (the turn was continued — tool use or a pause)');
         }
         if ($result->webSearchRequests > 0) {
             $this->line('web searches   : '.$result->webSearchRequests);
+        }
+        if ($result->forumSearches > 0) {
+            $this->line('forum lookups  : '.$result->forumSearches);
         }
         $this->newLine();
 

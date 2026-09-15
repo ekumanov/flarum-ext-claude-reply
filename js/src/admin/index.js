@@ -290,6 +290,54 @@ app.initializers.add('ekumanov/claude-reply', () => {
     next()
   );
 
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'forum_search',
+      type: 'boolean',
+      label: t('forum_search'),
+      help: t('forum_search_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'forum_search_max_uses',
+      type: 'number',
+      min: 1,
+      default: 4,
+      label: t('forum_search_max_uses'),
+      help: t('forum_search_max_uses_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'forum_search_results',
+      type: 'number',
+      min: 1,
+      max: 20,
+      default: 8,
+      label: t('forum_search_results'),
+      help: t('forum_search_results_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'forum_search_posts_read',
+      type: 'number',
+      min: 1,
+      max: 50,
+      default: 10,
+      label: t('forum_search_posts_read'),
+      help: t('forum_search_posts_read_help'),
+    },
+    next()
+  );
+
   // --- Voice ---------------------------------------------------------------
   heading('voice');
 

@@ -121,13 +121,14 @@ class GenerateReplyJob extends AbstractJob
             return;
         }
 
-        $result = $claude->reply($forumTitle, $botName, $rendered);
+        $result = $claude->reply($forumTitle, $botName, $rendered, (int) $row->discussion_id);
 
         $row->input_tokens                = $result->inputTokens;
         $row->output_tokens               = $result->outputTokens;
         $row->cache_read_input_tokens     = $result->cacheReadInputTokens;
         $row->cache_creation_input_tokens = $result->cacheCreationInputTokens;
         $row->web_search_requests         = $result->webSearchRequests;
+        $row->forum_searches              = $result->forumSearches;
         $row->api_calls                   = $result->apiCalls;
         $row->model                       = $result->model;
         $row->save();

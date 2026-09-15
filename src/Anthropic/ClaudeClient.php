@@ -4,7 +4,9 @@ namespace Ekumanov\ClaudeReply\Anthropic;
 
 use Anthropic\Client;
 use Anthropic\Messages\Message;
+use Anthropic\Messages\ToolUseBlock;
 use Anthropic\Messages\WebSearchTool20260209;
+use Ekumanov\ClaudeReply\Search\ForumTools;
 use Ekumanov\ClaudeReply\Settings\ApiKey;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 use GuzzleHttp\Client as GuzzleClient;
@@ -23,17 +25,18 @@ use Symfony\Component\HttpClient\Psr18Client as SymfonyPsr18Client;
  * SDK would need streaming to dodge HTTP timeouts, and the request timeout is
  * raised to cover a slow thinking turn.
  *
- * One reply is usually one call, but not always: with web search enabled the
- * API may end a response with `pause_turn`, meaning it suspended a
- * long-running turn partway through and is waiting to be handed it back. That
- * is a continuation of the same turn, not a new one — see {@see reply()}.
+ * One reply is often more than one call. Two things extend a turn, and both
+ * are continuations of the same turn rather than new ones: `pause_turn`, where
+ * the API suspended a long-running turn and waits to be handed it back, and
+ * `tool_use`, where it is waiting on a forum lookup this process has to
+ * perform. {@see reply()} owns that loop and its bounds.
  *
- * No prompt caching. The system prompt is stable and would be cacheable, but
- * forum mentions arrive minutes or hours apart while the cache TTL is five
- * minutes — writes (1.25x) would almost never be read back (0.1x), so caching
- * here would cost more than it saves. (A paused turn resumes within seconds,
- * so continuations *would* read a cache back; it is only worth the breakpoint
- * if they ever become common, which so far they are not.)
+ * Caching is scoped to a single turn, never across replies. Across replies it
+ * would lose money: forum mentions arrive minutes or hours apart, far outside
+ * the five-minute TTL, so the 1.25x write would almost never be read back at
+ * 0.1x. Within a turn the arithmetic inverts — the calls are seconds apart and
+ * the prefix is identical because we only append — so the context carries a
+ * breakpoint whenever a tool could extend the turn. {@see firstMessage()}.
  */
 final class ClaudeClient
 {
@@ -68,6 +71,7 @@ final class ClaudeClient
         private readonly ApiKey $apiKey,
         private readonly SettingsRepository $settings,
         private readonly SystemPrompt $systemPrompt,
+        private readonly ForumTools $forumTools,
     ) {}
 
     /**
@@ -133,35 +137,44 @@ final class ClaudeClient
     }
 
     /**
-     * Generate one reply, continuing the turn if the API pauses it.
+     * Generate one reply, continuing the turn for as long as it needs.
      *
-     * A `pause_turn` stop reason is not a finished response. It means the API
-     * suspended a long-running turn — in practice, one that is working through
-     * server-side web searches — and the turn resumes by sending the assistant
-     * content straight back. Treating it as final publishes whatever preamble
-     * had been written before the pause, which is typically a sentence of
-     * throat-clearing rather than an answer.
+     * Neither `pause_turn` nor `tool_use` is a finished response. The first
+     * means the API suspended a long-running turn and will resume it if handed
+     * the assistant content straight back; the second means it is waiting on a
+     * forum lookup only this process can do. Treating either as final
+     * publishes whatever preamble had been written first, which is typically a
+     * sentence of throat-clearing rather than an answer.
      *
-     * Continuations are bounded three ways (call count, total wall clock, and
-     * a floor under what is left) because the pause can in principle repeat.
-     * When a bound is hit we stop and return with `stopReason` still set to
-     * `pause_turn`, which is how the caller tells an unfinished turn apart
-     * from a finished one — see {@see ReplyResult::isIncomplete()}.
+     * Continuations are bounded three ways — call count, total wall clock, and
+     * a floor under what is left — because either can repeat. The two stop
+     * reasons part company at the bound: a paused turn can simply be abandoned
+     * and reported unfinished, but a turn waiting on tools cannot, because the
+     * API requires a `tool_result` for every `tool_use` block. Those calls are
+     * declined and the turn gets one final call to answer without them.
+     *
+     * Where the turn is still unfinished at the end, `stopReason` says so and
+     * the caller refuses to publish it — see {@see ReplyResult::isIncomplete()}.
      */
-    public function reply(string $forumTitle, string $botName, string $context): ReplyResult
+    public function reply(string $forumTitle, string $botName, string $context, int $discussionId): ReplyResult
     {
-        $tools = null;
+        $tools      = [];
+        $forumTools = $this->forumTools->enabled();
 
         if ($this->settings->webSearchEnabled()) {
-            $tools = [
-                WebSearchTool20260209::with(
-                    maxUses: $this->settings->webSearchMaxUses(),
-                ),
-            ];
+            $tools[] = WebSearchTool20260209::with(
+                maxUses: $this->settings->webSearchMaxUses(),
+            );
         }
 
-        $system   = $this->systemPrompt->build($forumTitle, $botName);
-        $messages = [['role' => 'user', 'content' => $context]];
+        if ($forumTools) {
+            foreach ($this->forumTools->definitions() as $definition) {
+                $tools[] = $definition;
+            }
+        }
+
+        $system   = $this->systemPrompt->build($forumTitle, $botName, $forumTools);
+        $messages = [['role' => 'user', 'content' => $this->firstMessage($context, $tools !== [])]];
         $deadline = microtime(true) + self::TOTAL_BUDGET_SECONDS;
 
         /** @var list<string> Every text fragment of the turn, in order. */
@@ -173,6 +186,7 @@ final class ClaudeClient
         $cacheRead     = 0;
         $cacheCreation = 0;
         $webSearches   = 0;
+        $forumSearches = 0;
 
         while (true) {
             $timeout = min(self::TIMEOUT_SECONDS, max(1.0, $deadline - microtime(true)));
@@ -184,7 +198,7 @@ final class ClaudeClient
                 outputConfig: ['effort' => $this->settings->effort()],
                 system: $system,
                 thinking: ['type' => 'adaptive'],
-                tools: $tools,
+                tools: $tools === [] ? null : $tools,
                 requestOptions: ['timeout' => $timeout],
             );
 
@@ -204,18 +218,105 @@ final class ClaudeClient
                 $parts[] = $part;
             }
 
-            if ($message->stopReason !== 'pause_turn') {
+            $continuing = $message->stopReason === 'pause_turn' || $message->stopReason === 'tool_use';
+
+            if (! $continuing) {
                 break;
             }
 
             if ($calls >= self::MAX_CALLS
                 || $deadline - microtime(true) < self::MIN_CONTINUATION_SECONDS) {
+                // Out of budget. A paused turn is simply unfinished, but a
+                // turn waiting on tools cannot be left that way: the API
+                // requires a result for every tool_use block, so the calls are
+                // answered with a refusal and the turn is given one last
+                // chance to write an answer without them.
+                if ($message->stopReason !== 'tool_use') {
+                    break;
+                }
+
+                $refusals = $this->refuseCalls($message);
+
+                if ($refusals === []) {
+                    break;
+                }
+
+                $messages[] = ['role' => 'assistant', 'content' => $message->content];
+                $messages[] = ['role' => 'user', 'content' => $refusals];
+
+                $lastChance = min(self::TIMEOUT_SECONDS, max(30.0, $deadline - microtime(true)));
+
+                $message = $this->client($lastChance)->messages->create(
+                    maxTokens: $this->settings->maxTokens(),
+                    messages: $messages,
+                    model: $this->settings->model(),
+                    outputConfig: ['effort' => $this->settings->effort()],
+                    system: $system,
+                    thinking: ['type' => 'adaptive'],
+                    tools: $tools === [] ? null : $tools,
+                    requestOptions: ['timeout' => $lastChance],
+                );
+
+                $calls++;
+                $inputTokens   += $message->usage->inputTokens;
+                $outputTokens  += $message->usage->outputTokens;
+                $cacheRead     += $message->usage->cacheReadInputTokens ?? 0;
+                $cacheCreation += $message->usage->cacheCreationInputTokens ?? 0;
+                $webSearches   += $message->usage->serverToolUse?->webSearchRequests ?? 0;
+
+                foreach ($this->textParts($message) as $part) {
+                    $parts[] = $part;
+                }
+
                 break;
             }
 
-            // Hand the paused turn back verbatim. Anything dropped or
-            // reordered here reads to the model as an edit of its own output.
+            // Hand the turn back. For a pause that is the assistant content
+            // verbatim — anything dropped or reordered reads to the model as
+            // an edit of its own output. For tool use it is that same content
+            // followed by one user message carrying a result for EVERY
+            // tool_use block; splitting them across messages, or omitting one,
+            // is a protocol error.
             $messages[] = ['role' => 'assistant', 'content' => $message->content];
+
+            if ($message->stopReason === 'tool_use') {
+                $results = [];
+
+                foreach ($this->toolCalls($message) as $block) {
+                    // Counted only when actually performed: a refused call
+                    // costs a round trip but reads nothing, and the ledger
+                    // column means "lookups done", not "lookups asked for".
+                    if ($forumSearches >= $this->settings->forumSearchMaxUses()) {
+                        $results[] = [
+                            'type' => 'tool_result',
+                            'toolUseID' => $block->id,
+                            'content' => 'You have used the forum tools as many times as this reply '
+                                .'allows. Answer with what you already have.',
+                        ];
+
+                        continue;
+                    }
+
+                    $results[] = [
+                        'type' => 'tool_result',
+                        'toolUseID' => $block->id,
+                        'content' => $this->forumTools->run($block->name, $block->input, $discussionId),
+                    ];
+
+                    $forumSearches++;
+                }
+
+                if ($results === []) {
+                    // stop_reason said tool_use but nothing in the content was
+                    // a call we own. Continuing would send a user message with
+                    // no results, which the API rejects — stop instead and let
+                    // the caller see the unfinished stop reason.
+                    array_pop($messages);
+                    break;
+                }
+
+                $messages[] = ['role' => 'user', 'content' => $results];
+            }
         }
 
         return new ReplyResult(
@@ -228,7 +329,85 @@ final class ClaudeClient
             cacheReadInputTokens: $cacheRead,
             cacheCreationInputTokens: $cacheCreation,
             webSearchRequests: $webSearches,
+            forumSearches: $forumSearches,
         );
+    }
+
+    /**
+     * The opening user message, with a cache breakpoint when tools are on.
+     *
+     * The class docblock explains why nothing is cached *between* replies. A
+     * single reply is a different matter once tools exist: a turn that
+     * searches, reads and then answers is three calls seconds apart, each
+     * resending the whole context, and the prefix is identical every time
+     * because we only ever append. Writing the breakpoint costs 1.25x once and
+     * every later call in the turn reads it at 0.1x, so it pays for itself
+     * from the second call onward and loses about a quarter of the context's
+     * input cost on a reply that turns out to need only one.
+     *
+     * Hence the condition: breakpoint only when some tool could extend the
+     * turn. With no tools at all a reply is always one call and the write
+     * would be pure loss. `api_calls` in the ledger is what says whether that
+     * bet is paying off in practice.
+     *
+     * @return string|list<array<string, mixed>>
+     */
+    private function firstMessage(string $context, bool $cacheable): string|array
+    {
+        if (! $cacheable) {
+            return $context;
+        }
+
+        return [[
+            'type' => 'text',
+            'text' => $context,
+            'cacheControl' => ['type' => 'ephemeral'],
+        ]];
+    }
+
+    /**
+     * The tool calls in a message that this extension is responsible for.
+     *
+     * Server-side tools arrive as `server_tool_use` blocks and are Anthropic's
+     * to run, not ours; answering one would be wrong. Matching on the block
+     * type and then on our own tool names keeps the two apart even if a future
+     * server tool starts sharing the block type.
+     *
+     * @return list<ToolUseBlock>
+     */
+    private function toolCalls(Message $message): array
+    {
+        $names = [ForumTools::SEARCH, ForumTools::READ];
+        $calls = [];
+
+        foreach ($message->content as $block) {
+            if ($block instanceof ToolUseBlock && in_array($block->name, $names, true)) {
+                $calls[] = $block;
+            }
+        }
+
+        return $calls;
+    }
+
+    /**
+     * Results that decline every pending call, for the out-of-budget path.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function refuseCalls(Message $message): array
+    {
+        $results = [];
+
+        foreach ($this->toolCalls($message) as $block) {
+            $results[] = [
+                'type' => 'tool_result',
+                'toolUseID' => $block->id,
+                'content' => 'This reply has run out of time for forum lookups. '
+                    .'Write your answer now with what you already know.',
+            ];
+        }
+
+        return $results;
     }
 
     /**

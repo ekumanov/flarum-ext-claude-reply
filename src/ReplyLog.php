@@ -20,6 +20,7 @@ use Flarum\Database\AbstractModel;
  * @property int|null $cache_read_input_tokens
  * @property int|null $cache_creation_input_tokens
  * @property int|null $web_search_requests
+ * @property int|null $forum_searches
  * @property int|null $api_calls
  * @property int|null $context_posts
  * @property \Carbon\Carbon $created_at

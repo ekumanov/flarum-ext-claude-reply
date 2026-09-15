@@ -251,6 +251,44 @@ final class SettingsRepository
         return max(1, $this->intSetting('web_search_max_uses', 5));
     }
 
+    /**
+     * Let Claude search this forum's other discussions while composing.
+     *
+     * Off by default, and deliberately a separate switch from web search: the
+     * two have different risk shapes. Web search reads the public internet;
+     * this reads the forum's own content and can quote it into a public reply,
+     * so it is the one an admin should have to turn on knowingly.
+     */
+    public function forumSearchEnabled(): bool
+    {
+        return $this->boolSetting('forum_search', false);
+    }
+
+    /**
+     * Max forum tool calls per reply.
+     *
+     * Not the same ceiling as the loop's own call bound — that one exists to
+     * stop a runaway turn, this one to stop a thorough one from costing four
+     * times what it should. Each call resends the whole conversation, so the
+     * marginal search is more expensive than the one before it.
+     */
+    public function forumSearchMaxUses(): int
+    {
+        return max(1, $this->intSetting('forum_search_max_uses', 4));
+    }
+
+    /** Discussions listed per forum search. */
+    public function forumSearchResults(): int
+    {
+        return max(1, min(20, $this->intSetting('forum_search_results', 8)));
+    }
+
+    /** Posts returned when the model opens one discussion. */
+    public function forumSearchPostsRead(): int
+    {
+        return max(1, min(50, $this->intSetting('forum_search_posts_read', 10)));
+    }
+
     private function boolSetting(string $key, bool $default): bool
     {
         $v = $this->settings->get(self::PREFIX.$key);

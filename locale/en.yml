@@ -168,6 +168,28 @@ ekumanov-claude-reply:
       web_search_max_uses: Max searches per reply
       web_search_max_uses_help: Caps searches for a single reply.
 
+      forum_search: Allow searching this forum
+      forum_search_help: >-
+        Lets Claude search this forum's other discussions while composing a reply, and
+        link or quote what it finds. It searches as a logged-out visitor would, so it can
+        only surface discussions any reader of the reply could already read, and the tag
+        rules above apply to results as well as to replies. No extra charge from Anthropic,
+        but every lookup adds a round trip that resends the conversation, so a reply that
+        searches costs more input tokens than one that does not.
+
+      forum_search_max_uses: Max forum lookups per reply
+      forum_search_max_uses_help: >-
+        Caps searches and discussion reads for a single reply. Each one costs another
+        round trip, so the later ones are the expensive ones.
+
+      forum_search_results: Results per search
+      forum_search_results_help: How many discussions one search returns.
+
+      forum_search_posts_read: Posts per discussion
+      forum_search_posts_read_help: >-
+        How much of a discussion Claude sees when it opens one from the results. Only the
+        beginning of the discussion is ever returned.
+
       # --- voice ------------------------------------------------------------
       persona_prompt: Persona / house style
       persona_prompt_help: >-

@@ -210,30 +210,10 @@ final class ContextBuilder
         return (string) preg_replace('/"#[a-z]{0,3}[0-9]+/', '_', $name);
     }
 
-    /**
-     * The author's original source text.
-     *
-     * `$post->content` already IS the unparsed source: Flarum's
-     * HasFormattedContent accessor runs the formatter's unparse chain on read
-     * (which is also what restores `@"Nickname"#42` mention syntax from the
-     * stored XML). Calling `Formatter::unparse()` on it would unparse twice.
-     * The raw XML, when we want it, is `$post->parsed_content`.
-     *
-     * Falls back to a stripped rendering of the XML if the accessor throws —
-     * one malformed post must not sink the whole reply.
-     */
+    /** The author's original source text — see {@see PostText} for the trap. */
     private function unparse(Post $post): string
     {
-        try {
-            $text = $post->content;
-            if (is_string($text) && trim($text) !== '') {
-                return trim($text);
-            }
-        } catch (Throwable) {
-            // fall through
-        }
-
-        return trim(strip_tags((string) $post->parsed_content));
+        return PostText::of($post);
     }
 
     /**
