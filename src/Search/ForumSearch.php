@@ -108,6 +108,17 @@ final class ForumSearch
                     actor: new Guest(),
                     filters: ['q' => $query],
                     limit: $limit * self::OVERFETCH,
+                    // Relevance ordering is not the default — it has to be
+                    // asked for. FulltextFilter registers its scoring as the
+                    // state's *default sort*, and AbstractSearcher::applySort()
+                    // only reaches for that when `sortIsDefault` is true, which
+                    // is core's way of saying "the caller expressed no
+                    // preference, so rank these". Leave it false, as the
+                    // parameter default does, and the ranking is silently
+                    // discarded: results come back in table order, which looks
+                    // like working search right up until you compare it with
+                    // the forum's own.
+                    sortIsDefault: true,
                 ),
             )->getResults();
         } catch (Throwable $e) {
