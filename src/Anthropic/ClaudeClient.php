@@ -64,8 +64,21 @@ final class ClaudeClient
      */
     private const MIN_CONTINUATION_SECONDS = 45.0;
 
-    /** Most API calls one reply may cost, continuations included. */
-    private const MAX_CALLS = 4;
+    /**
+     * Most API calls one reply may cost, continuations included.
+     *
+     * A backstop, not the working limit. The budget that should actually
+     * govern a thorough reply is `forum_search_max_uses`, and at 4 this bound
+     * silently overruled it: a search, a read and a search is three lookups
+     * and four calls, so the fourth request tripped this before the setting
+     * ever applied, and raising the setting above three did nothing at all.
+     *
+     * Six leaves room for the configured number of lookups plus the call that
+     * writes the answer, which puts the setting back in charge and leaves
+     * TOTAL_BUDGET_SECONDS as the bound that really protects the queue — a
+     * wall clock is a truer measure of a runaway turn than a call count.
+     */
+    private const MAX_CALLS = 6;
 
     public function __construct(
         private readonly ApiKey $apiKey,

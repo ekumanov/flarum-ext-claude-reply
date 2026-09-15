@@ -187,8 +187,10 @@ ekumanov-claude-reply:
 
       forum_search_posts_read: Posts per discussion
       forum_search_posts_read_help: >-
-        How much of a discussion Claude sees when it opens one from the results. Only the
-        beginning of the discussion is ever returned.
+        How much of a discussion Claude sees when it opens one from the results. Split
+        between the start and the end, with a marker showing how much was skipped — on a
+        long thread the conclusion is at the end, and reading only the opening never
+        reaches it.
 
       # --- voice ------------------------------------------------------------
       persona_prompt: Persona / house style

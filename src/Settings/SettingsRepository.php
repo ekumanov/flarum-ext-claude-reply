@@ -277,16 +277,33 @@ final class SettingsRepository
         return max(1, $this->intSetting('forum_search_max_uses', 4));
     }
 
-    /** Discussions listed per forum search. */
+    /**
+     * Discussions listed per forum search.
+     *
+     * Twelve rather than eight because relevance decay turns out to depend on
+     * the topic, not on the rank: a narrow query is noise by rank five, but a
+     * subject the forum has worked over for years stays on-topic past rank
+     * fifteen, and eight cut those off mid-seam. Each result costs ~90 tokens,
+     * so the four extra are cheap insurance. Going much higher is not free in
+     * quality terms — on a narrow query the tail is padding, and padding is
+     * what the model has to rerank through.
+     */
     public function forumSearchResults(): int
     {
-        return max(1, min(20, $this->intSetting('forum_search_results', 8)));
+        return max(1, min(20, $this->intSetting('forum_search_results', 12)));
     }
 
-    /** Posts returned when the model opens one discussion. */
+    /**
+     * Posts returned when the model opens one discussion.
+     *
+     * Split between the start and the end of the discussion rather than spent
+     * on the start alone — on a long thread the conclusion is at the far end,
+     * and no amount of this budget spent at the opening will reach it. See
+     * {@see \Ekumanov\ClaudeReply\Search\ForumSearch::readDiscussion()}.
+     */
     public function forumSearchPostsRead(): int
     {
-        return max(1, min(50, $this->intSetting('forum_search_posts_read', 10)));
+        return max(1, min(50, $this->intSetting('forum_search_posts_read', 15)));
     }
 
     private function boolSetting(string $key, bool $default): bool

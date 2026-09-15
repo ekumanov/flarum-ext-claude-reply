@@ -83,10 +83,12 @@ final class ForumTools
             [
                 'name' => self::READ,
                 'description' =>
-                    'Read the opening post and first replies of one discussion on this forum, by the numeric id '
-                    .'given in a '.self::SEARCH.' result. Use it when a search result looks like it actually '
-                    .'answers the question and you want to say what it concluded rather than just link it. Only '
-                    .'the beginning of the discussion is returned, and only if any visitor could read it.',
+                    'Read one discussion on this forum, by the numeric id given in a '.self::SEARCH
+                    .' result. Use it when a search result looks like it actually answers the question and you '
+                    .'want to say what it concluded rather than just link it. Long discussions come back as the '
+                    .'beginning and the end with a marker showing how much was skipped between them — so the '
+                    .'posts either side of that marker may be years apart, and you must not read them as one '
+                    .'continuous exchange. Only discussions any visitor could read are returned.',
                 'inputSchema' => [
                     'type' => 'object',
                     'properties' => [
