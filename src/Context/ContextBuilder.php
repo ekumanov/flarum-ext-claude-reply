@@ -59,7 +59,7 @@ final class ContextBuilder
         $candidates = $discussion->comments()
             ->where('number', '<=', $trigger->number)
             ->orderByDesc('number')
-            ->with(['user', 'mentionsUsers'])
+            ->with(['user', 'mentionsUsers', 'mentionsPosts.user'])
             ->limit($maxPosts)
             ->get();
 
@@ -90,7 +90,7 @@ final class ContextBuilder
         // a configured budget of 20000 produced a 23237-token context. The
         // trigger itself is exempt and was already taken above.
         foreach ($this->quotedPostIds($trigger) as $postId) {
-            $quoted = $discussion->comments()->with(['user', 'mentionsUsers'])->find($postId);
+            $quoted = $discussion->comments()->with(['user', 'mentionsUsers', 'mentionsPosts.user'])->find($postId);
             if ($quoted === null) {
                 continue;
             }
@@ -113,7 +113,7 @@ final class ContextBuilder
             }
 
             if (! $alreadyHave) {
-                $first = $discussion->comments()->with(['user', 'mentionsUsers'])->find($firstPostId);
+                $first = $discussion->comments()->with(['user', 'mentionsUsers', 'mentionsPosts.user'])->find($firstPostId);
                 if ($first !== null) {
                     $ctx = $this->toContextPost($first, $firstPostId, $trigger->id);
                     if ($tokens + $ctx->estimatedTokens() <= $budget) {

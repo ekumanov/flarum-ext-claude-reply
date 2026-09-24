@@ -78,6 +78,12 @@ final class ForumAttributes
             'allowedTagIds' => $tags->allowed,
             'deniedTagIds'  => $tags->denied,
 
+            // Without these the client could only mirror allow-list mode: in
+            // blocklist mode with an empty allow-list it concluded that no tag
+            // was answerable, so the quota warning never fired.
+            'tagsBlocklistMode' => $this->settings->tagsBlocklistMode(),
+            'tagsBypass'        => $actor->isAdmin() && $this->settings->adminBypassTags(),
+
             // Needed to spot the mention in the composer's raw text, in both
             // the `@"Name"#id` and bare `@username` forms.
             'botId'       => $botId,

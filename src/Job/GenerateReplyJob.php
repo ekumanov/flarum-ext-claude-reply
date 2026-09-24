@@ -4,6 +4,8 @@ namespace Ekumanov\ClaudeReply\Job;
 
 use Carbon\Carbon;
 use Ekumanov\ClaudeReply\Anthropic\ClaudeClient;
+use Ekumanov\ClaudeReply\Anthropic\ReplyResult;
+use Ekumanov\ClaudeReply\Anthropic\UnfinishedTurnException;
 use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Context\ContextBuilder;
 use Ekumanov\ClaudeReply\PostPublisher;
@@ -60,6 +62,14 @@ class GenerateReplyJob extends AbstractJob
         try {
             $this->run($row, $contextBuilder, $claude, $publisher, $bot, $sanitizer, $settings, $rawSettings, $log);
         } catch (Throwable $e) {
+            // A turn that failed partway was still billed for the calls that
+            // completed. Recording them keeps the ledger honest and — because
+            // the caps count a failed row only when it carries token usage —
+            // keeps an API incident from making every mention free.
+            if ($e instanceof UnfinishedTurnException) {
+                $this->recordUsage($row, $e->partial);
+            }
+
             $this->markFailed($row, substr($e->getMessage(), 0, 250));
 
             $log->error('claude-reply: generation failed', [
@@ -95,6 +105,22 @@ class GenerateReplyJob extends AbstractJob
             return;
         }
 
+        if ((bool) $trigger->is_private) {
+            // Held for approval (flarum/approval marks those private). The
+            // context builder only sees public posts, so the reply would answer
+            // a question it was never shown, in public.
+            $this->markSkipped($row, 'trigger post not public');
+            return;
+        }
+
+        // Checked before anything is billed: the publish at the end runs as
+        // the bot, and a locked discussion or a tag the bot cannot reply in
+        // would otherwise refuse it only after the whole turn was paid for.
+        if ($trigger->discussion === null || $botUser->cannot('reply', $trigger->discussion)) {
+            $this->markSkipped($row, 'bot cannot reply in this discussion');
+            return;
+        }
+
         $forumTitle = (string) ($rawSettings->get('forum_title') ?: 'this forum');
         $botName    = $botUser->display_name ?? $settings->botUsername();
 
@@ -123,15 +149,7 @@ class GenerateReplyJob extends AbstractJob
 
         $result = $claude->reply($forumTitle, $botName, $rendered, (int) $row->discussion_id);
 
-        $row->input_tokens                = $result->inputTokens;
-        $row->output_tokens               = $result->outputTokens;
-        $row->cache_read_input_tokens     = $result->cacheReadInputTokens;
-        $row->cache_creation_input_tokens = $result->cacheCreationInputTokens;
-        $row->web_search_requests         = $result->webSearchRequests;
-        $row->forum_searches              = $result->forumSearches;
-        $row->api_calls                   = $result->apiCalls;
-        $row->model                       = $result->model;
-        $row->save();
+        $this->recordUsage($row, $result);
 
         // Check stop_reason before trusting content: a refusal returns HTTP
         // 200 with empty or partial content.
@@ -207,6 +225,19 @@ class GenerateReplyJob extends AbstractJob
             'out' => $result->outputTokens,
             'calls' => $result->apiCalls,
         ]);
+    }
+
+    private function recordUsage(ReplyLog $row, ReplyResult $result): void
+    {
+        $row->input_tokens                = $result->inputTokens;
+        $row->output_tokens               = $result->outputTokens;
+        $row->cache_read_input_tokens     = $result->cacheReadInputTokens;
+        $row->cache_creation_input_tokens = $result->cacheCreationInputTokens;
+        $row->web_search_requests         = $result->webSearchRequests;
+        $row->forum_searches              = $result->forumSearches;
+        $row->api_calls                   = $result->apiCalls;
+        $row->model                       = $result->model;
+        $row->save();
     }
 
     /**

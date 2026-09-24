@@ -20,6 +20,8 @@ export function quotaState() {
     botUsername: String(raw.botUsername || ''),
     allowedTagIds: (raw.allowedTagIds || []).map(Number),
     deniedTagIds: (raw.deniedTagIds || []).map(Number),
+    tagsBlocklistMode: !!raw.tagsBlocklistMode,
+    tagsBypass: !!raw.tagsBypass,
     perUserLimit: Number(raw.perUserLimit || 0),
     // null means no per-user limit at all, which is not the same as 0 left.
     remaining: raw.remaining === null || raw.remaining === undefined ? null : Number(raw.remaining),

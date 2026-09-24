@@ -135,6 +135,12 @@ final class HandleMention
             return;
         }
 
+        // A post held for approval is private until a moderator releases it;
+        // answering it in public would reply to something nobody can see yet.
+        if ((bool) $post->is_private) {
+            return;
+        }
+
         $discussion = $post->discussion;
 
         if ($discussion === null) {

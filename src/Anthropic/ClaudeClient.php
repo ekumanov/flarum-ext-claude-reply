@@ -12,6 +12,7 @@ use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 use GuzzleHttp\Client as GuzzleClient;
 use Psr\Http\Client\ClientInterface;
 use RuntimeException;
+use Throwable;
 use Symfony\Component\HttpClient\HttpClient as SymfonyHttpClient;
 use Symfony\Component\HttpClient\Psr18Client as SymfonyPsr18Client;
 
@@ -99,7 +100,9 @@ final class ClaudeClient
             model: $this->settings->model(),
             system: $this->systemPrompt->build($forumTitle, $botName),
             thinking: ['type' => 'adaptive'],
-            requestOptions: ['timeout' => $timeout],
+            // One retry, not the SDK's default two: 3 x 30s here plus the
+            // reply's 340s would not fit inside the job's 420s timeout.
+            requestOptions: ['timeout' => $timeout, 'maxRetries' => 1],
         )->inputTokens;
     }
 
@@ -194,9 +197,7 @@ final class ClaudeClient
         $webSearches   = 0;
         $forumSearches = 0;
 
-        while (true) {
-            $timeout = min(self::TIMEOUT_SECONDS, max(1.0, $deadline - microtime(true)));
-
+        $call = function (float $timeout) use (&$messages, $system, $tools, &$calls, &$inputTokens, &$outputTokens, &$cacheRead, &$cacheCreation, &$webSearches): Message {
             $message = $this->client($timeout)->messages->create(
                 maxTokens: $this->settings->maxTokens(),
                 messages: $messages,
@@ -205,124 +206,143 @@ final class ClaudeClient
                 system: $system,
                 thinking: ['type' => 'adaptive'],
                 tools: $tools === [] ? null : $tools,
-                requestOptions: ['timeout' => $timeout],
+                // No SDK retries. Each one gets the full per-call timeout
+                // again and honours retry-after without an upper bound, so
+                // they could carry the turn past the job's own timeout — the
+                // queue then kills the worker with the spend unrecorded. A
+                // failed reply is recorded and the member can simply ask again.
+                requestOptions: ['timeout' => $timeout, 'maxRetries' => 0],
             );
-
-            $calls++;
 
             // Usage is per call, so every counter is a running total. The
             // spend ledger has to bill the whole turn, not just its last leg.
-            $usage = $message->usage;
+            $calls++;
+            $inputTokens   += $message->usage->inputTokens;
+            $outputTokens  += $message->usage->outputTokens;
+            $cacheRead     += $message->usage->cacheReadInputTokens ?? 0;
+            $cacheCreation += $message->usage->cacheCreationInputTokens ?? 0;
+            $webSearches   += $message->usage->serverToolUse?->webSearchRequests ?? 0;
 
-            $inputTokens   += $usage->inputTokens;
-            $outputTokens  += $usage->outputTokens;
-            $cacheRead     += $usage->cacheReadInputTokens ?? 0;
-            $cacheCreation += $usage->cacheCreationInputTokens ?? 0;
-            $webSearches   += $usage->serverToolUse?->webSearchRequests ?? 0;
+            return $message;
+        };
 
-            foreach ($this->textParts($message) as $part) {
-                $parts[] = $part;
-            }
+        $message = null;
 
-            $continuing = $message->stopReason === 'pause_turn' || $message->stopReason === 'tool_use';
+        try {
+            while (true) {
+                $message = $call(min(self::TIMEOUT_SECONDS, max(1.0, $deadline - microtime(true))));
 
-            if (! $continuing) {
-                break;
-            }
-
-            if ($calls >= $maxCalls
-                || $deadline - microtime(true) < self::MIN_CONTINUATION_SECONDS) {
-                // Out of budget. A paused turn is simply unfinished, but a
-                // turn waiting on tools cannot be left that way: the API
-                // requires a result for every tool_use block, so the calls are
-                // answered with a refusal and the turn is given one last
-                // chance to write an answer without them.
+                // Text written in a leg that ends by asking for a forum lookup
+                // is the "let me check earlier threads" preamble, not part of
+                // the answer — the answer is written after the results come
+                // back. Keeping it published that sentence at the top of the
+                // reply, fused onto the next leg's first word. Pause legs are
+                // different: the seam falls mid-answer, so they are kept.
                 if ($message->stopReason !== 'tool_use') {
+                    foreach ($this->textParts($message) as $part) {
+                        $parts[] = $part;
+                    }
+                }
+
+                $continuing = $message->stopReason === 'pause_turn' || $message->stopReason === 'tool_use';
+
+                if (! $continuing) {
                     break;
                 }
 
-                $refusals = $this->refuseCalls($message);
+                if ($calls >= $maxCalls
+                    || $deadline - microtime(true) < self::MIN_CONTINUATION_SECONDS) {
+                    // Out of budget. A paused turn is simply unfinished, but a
+                    // turn waiting on tools cannot be left that way: the API
+                    // requires a result for every tool_use block, so the calls
+                    // are answered with a refusal and the turn is given one
+                    // last chance to write an answer without them.
+                    if ($message->stopReason !== 'tool_use') {
+                        break;
+                    }
 
-                if ($refusals === []) {
+                    $refusals = $this->refuseCalls($message);
+
+                    if ($refusals === []) {
+                        break;
+                    }
+
+                    $messages[] = ['role' => 'assistant', 'content' => $message->content];
+                    $messages[] = ['role' => 'user', 'content' => $this->withRollingBreakpoint($messages, $refusals)];
+
+                    $message = $call(min(self::TIMEOUT_SECONDS, max(30.0, $deadline - microtime(true))));
+
+                    foreach ($this->textParts($message) as $part) {
+                        $parts[] = $part;
+                    }
+
                     break;
                 }
 
+                // Hand the turn back. For a pause that is the assistant content
+                // verbatim — anything dropped or reordered reads to the model as
+                // an edit of its own output. For tool use it is that same content
+                // followed by one user message carrying a result for EVERY
+                // tool_use block; splitting them across messages, or omitting one,
+                // is a protocol error.
                 $messages[] = ['role' => 'assistant', 'content' => $message->content];
-                $messages[] = ['role' => 'user', 'content' => $refusals];
 
-                $lastChance = min(self::TIMEOUT_SECONDS, max(30.0, $deadline - microtime(true)));
+                if ($message->stopReason === 'tool_use') {
+                    $results = [];
 
-                $message = $this->client($lastChance)->messages->create(
-                    maxTokens: $this->settings->maxTokens(),
-                    messages: $messages,
-                    model: $this->settings->model(),
-                    outputConfig: ['effort' => $this->settings->effort()],
-                    system: $system,
-                    thinking: ['type' => 'adaptive'],
-                    tools: $tools === [] ? null : $tools,
-                    requestOptions: ['timeout' => $lastChance],
-                );
+                    foreach ($this->toolCalls($message) as $block) {
+                        // Counted only when actually performed: a refused call
+                        // costs a round trip but reads nothing, and the ledger
+                        // column means "lookups done", not "lookups asked for".
+                        if ($forumSearches >= $this->settings->forumSearchMaxUses()) {
+                            $results[] = [
+                                'type' => 'tool_result',
+                                'toolUseID' => $block->id,
+                                'content' => 'You have used the forum tools as many times as this reply '
+                                    .'allows. Answer with what you already have.',
+                            ];
 
-                $calls++;
-                $inputTokens   += $message->usage->inputTokens;
-                $outputTokens  += $message->usage->outputTokens;
-                $cacheRead     += $message->usage->cacheReadInputTokens ?? 0;
-                $cacheCreation += $message->usage->cacheCreationInputTokens ?? 0;
-                $webSearches   += $message->usage->serverToolUse?->webSearchRequests ?? 0;
+                            continue;
+                        }
 
-                foreach ($this->textParts($message) as $part) {
-                    $parts[] = $part;
-                }
-
-                break;
-            }
-
-            // Hand the turn back. For a pause that is the assistant content
-            // verbatim — anything dropped or reordered reads to the model as
-            // an edit of its own output. For tool use it is that same content
-            // followed by one user message carrying a result for EVERY
-            // tool_use block; splitting them across messages, or omitting one,
-            // is a protocol error.
-            $messages[] = ['role' => 'assistant', 'content' => $message->content];
-
-            if ($message->stopReason === 'tool_use') {
-                $results = [];
-
-                foreach ($this->toolCalls($message) as $block) {
-                    // Counted only when actually performed: a refused call
-                    // costs a round trip but reads nothing, and the ledger
-                    // column means "lookups done", not "lookups asked for".
-                    if ($forumSearches >= $this->settings->forumSearchMaxUses()) {
                         $results[] = [
                             'type' => 'tool_result',
                             'toolUseID' => $block->id,
-                            'content' => 'You have used the forum tools as many times as this reply '
-                                .'allows. Answer with what you already have.',
+                            'content' => $this->forumTools->run($block->name, $block->input, $discussionId),
                         ];
 
-                        continue;
+                        $forumSearches++;
                     }
 
-                    $results[] = [
-                        'type' => 'tool_result',
-                        'toolUseID' => $block->id,
-                        'content' => $this->forumTools->run($block->name, $block->input, $discussionId),
-                    ];
+                    if ($results === []) {
+                        // stop_reason said tool_use but nothing in the content was
+                        // a call we own. Continuing would send a user message with
+                        // no results, which the API rejects — stop instead and let
+                        // the caller see the unfinished stop reason.
+                        array_pop($messages);
+                        break;
+                    }
 
-                    $forumSearches++;
+                    $messages[] = ['role' => 'user', 'content' => $this->withRollingBreakpoint($messages, $results)];
                 }
-
-                if ($results === []) {
-                    // stop_reason said tool_use but nothing in the content was
-                    // a call we own. Continuing would send a user message with
-                    // no results, which the API rejects — stop instead and let
-                    // the caller see the unfinished stop reason.
-                    array_pop($messages);
-                    break;
-                }
-
-                $messages[] = ['role' => 'user', 'content' => $results];
             }
+        } catch (Throwable $e) {
+            if ($calls === 0) {
+                throw $e; // nothing billed; the plain failure is the whole story
+            }
+
+            throw new UnfinishedTurnException(new ReplyResult(
+                text: '',
+                model: $message?->model ?? $this->settings->model(),
+                stopReason: null,
+                apiCalls: $calls,
+                inputTokens: $inputTokens,
+                outputTokens: $outputTokens,
+                cacheReadInputTokens: $cacheRead,
+                cacheCreationInputTokens: $cacheCreation,
+                webSearchRequests: $webSearches,
+                forumSearches: $forumSearches,
+            ), $e);
         }
 
         return new ReplyResult(
@@ -393,6 +413,42 @@ final class ClaudeClient
             'text' => $context,
             'cacheControl' => ['type' => 'ephemeral'],
         ]];
+    }
+
+    /**
+     * Put a cache breakpoint on the newest tool results, and take it off the
+     * previous ones.
+     *
+     * The opening context carries its own breakpoint ({@see firstMessage()}),
+     * but everything appended after it — each lookup's results, and the web
+     * search results inside the assistant turns — used to be resent at full
+     * price on every later call of the turn. A second breakpoint that moves to
+     * the end of each tool-result message makes the whole conversation so far
+     * a cache read on the next call. Only the newest is kept: the API allows
+     * four breakpoints per request, and the lookback from the newest one finds
+     * the entry the previous call wrote.
+     *
+     * @param list<array<string, mixed>> $messages   the conversation so far (modified: older tool-result breakpoints are removed)
+     * @param list<array<string, mixed>> $results
+     * @return list<array<string, mixed>>
+     */
+    private function withRollingBreakpoint(array &$messages, array $results): array
+    {
+        foreach ($messages as $i => $msg) {
+            if ($i === 0 || $msg['role'] !== 'user' || ! is_array($msg['content'])) {
+                continue;
+            }
+
+            foreach ($msg['content'] as $j => $block) {
+                if (is_array($block) && isset($block['cacheControl'])) {
+                    unset($messages[$i]['content'][$j]['cacheControl']);
+                }
+            }
+        }
+
+        $results[array_key_last($results)]['cacheControl'] = ['type' => 'ephemeral'];
+
+        return $results;
     }
 
     /**

@@ -67,6 +67,14 @@ use Throwable;
 final class ForumSearch
 {
     /**
+     * Relations the unparser reaches for. flarum/mentions rewrites every
+     * quote and @-mention to the current display name as it unparses, and
+     * falls back to a query per mention (plus a lazy user) when these are
+     * not loaded — dozens of point queries on a quote-heavy thread.
+     */
+    private const POST_RELATIONS = ['user', 'mentionsUsers', 'mentionsPosts.user'];
+
+    /**
      * Ask the searcher for more hits than we will return.
      *
      * The tag filter runs after the search, so without headroom a query whose
@@ -126,7 +134,7 @@ final class ForumSearch
             // and the snippet both reach through a relation on every hit, and
             // with a dozen results over-fetched fourfold that is a hundred
             // stray queries on a page the member is waiting for.
-            $results->load(['user', 'firstPost', 'tags']);
+            $results->load(['user', 'firstPost.mentionsUsers', 'firstPost.mentionsPosts.user', 'tags']);
         } catch (Throwable $e) {
             return 'The forum search failed: '.$e->getMessage();
         }
@@ -210,17 +218,17 @@ final class ForumSearch
             $total = (int) $readable()->count();
 
             if ($total <= $max) {
-                $head = $readable()->orderBy('number')->with('user')->get();
+                $head = $readable()->orderBy('number')->with(self::POST_RELATIONS)->get();
                 $tail = null;
                 $omitted = 0;
             } else {
                 $headSize = (int) ceil($max / 2);
                 $tailSize = $max - $headSize;
 
-                $head = $readable()->orderBy('number')->with('user')->limit($headSize)->get();
+                $head = $readable()->orderBy('number')->with(self::POST_RELATIONS)->limit($headSize)->get();
 
                 $tail = $tailSize > 0
-                    ? $readable()->orderByDesc('number')->with('user')->limit($tailSize)->get()->reverse()->values()
+                    ? $readable()->orderByDesc('number')->with(self::POST_RELATIONS)->limit($tailSize)->get()->reverse()->values()
                     : null;
 
                 $omitted = $total - $head->count() - ($tail?->count() ?? 0);

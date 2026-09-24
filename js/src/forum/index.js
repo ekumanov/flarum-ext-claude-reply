@@ -86,17 +86,26 @@ app.initializers.add('ekumanov/claude-reply', () => {
 function answerable(discussion, state) {
   if (!discussion) return false;
 
-  const tags = discussion.tags && discussion.tags();
+  if (state.tagsBypass) return true;
 
-  // Tags not loaded, or flarum/tags not installed: no basis for claiming the
-  // post would have been answered, so stay quiet rather than warn wrongly.
-  if (!tags || tags.length === 0) return false;
+  const blocklist = !!state.tagsBlocklistMode;
 
-  const ids = tags.map((tag) => Number(tag.id()));
+  // flarum/tags not installed: no allow-list to satisfy, nothing to exclude.
+  if (typeof discussion.tags !== 'function') return blocklist;
+
+  const tags = discussion.tags();
+
+  // Relationship not loaded: no basis for a claim either way, so stay quiet
+  // rather than warn wrongly.
+  if (!tags) return false;
+
+  if (tags.length === 0) return blocklist;
+
+  const ids = tags.filter(Boolean).map((tag) => Number(tag.id()));
 
   if (ids.some((id) => state.deniedTagIds.includes(id))) return false;
 
-  return ids.some((id) => state.allowedTagIds.includes(id));
+  return blocklist || ids.some((id) => state.allowedTagIds.includes(id));
 }
 
 function confirmPostWithoutReply(state) {
