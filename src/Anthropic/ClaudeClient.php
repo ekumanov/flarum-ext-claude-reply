@@ -3,6 +3,7 @@
 namespace Ekumanov\ClaudeReply\Anthropic;
 
 use Anthropic\Client;
+use Anthropic\Messages\CodeExecutionTool20260521;
 use Anthropic\Messages\Message;
 use Anthropic\Messages\ToolUseBlock;
 use Anthropic\Messages\WebSearchTool20260209;
@@ -58,6 +59,26 @@ final class ClaudeClient
      * queue mid-publish, which is the one failure mode that can double-post.
      */
     private const TOTAL_BUDGET_SECONDS = 340.0;
+
+    /**
+     * The same two ceilings when the code-execution sandbox is on.
+     *
+     * Making something in the sandbox is slow in a way a text reply is not:
+     * the model writes a program, runs it, reads the output, fixes it and runs
+     * it again, all inside one API call when it can. A five-minute piece of
+     * music took longer than the text budget allows. These must still fit
+     * inside GenerateReplyJob::$timeout with room for the publish.
+     */
+    private const SANDBOX_TIMEOUT_SECONDS = 480.0;
+
+    private const SANDBOX_TOTAL_BUDGET_SECONDS = 600.0;
+
+    /** Result block types that mean the sandbox ran something. */
+    private const SANDBOX_RESULT_TYPES = [
+        'bash_code_execution_tool_result',
+        'text_editor_code_execution_tool_result',
+        'code_execution_tool_result',
+    ];
 
     /**
      * Never start a continuation with less than this much budget left — an
@@ -168,6 +189,7 @@ final class ClaudeClient
     {
         $tools      = [];
         $forumTools = $this->forumTools->enabled();
+        $sandbox    = $this->settings->codeExecutionEnabled();
 
         if ($this->settings->webSearchEnabled()) {
             $tools[] = WebSearchTool20260209::with(
@@ -181,13 +203,27 @@ final class ClaudeClient
             }
         }
 
-        $maxCalls = $this->maxCalls($forumTools);
-        $system   = $this->systemPrompt->build($forumTitle, $botName, $forumTools);
-        $messages = [['role' => 'user', 'content' => $this->firstMessage($context, $tools !== [])]];
-        $deadline = microtime(true) + self::TOTAL_BUDGET_SECONDS;
+        if ($sandbox) {
+            $tools[] = CodeExecutionTool20260521::with();
+        }
+
+        $maxCalls   = $this->maxCalls($forumTools);
+        $system     = $this->systemPrompt->build($forumTitle, $botName, $forumTools, $sandbox);
+        $messages   = [['role' => 'user', 'content' => $this->firstMessage($context, $tools !== [])]];
+        $perCall    = $sandbox ? self::SANDBOX_TIMEOUT_SECONDS : self::TIMEOUT_SECONDS;
+        $deadline   = microtime(true) + ($sandbox ? self::SANDBOX_TOTAL_BUDGET_SECONDS : self::TOTAL_BUDGET_SECONDS);
+
+        /**
+         * The sandbox the turn is running in. A continuation sent without it
+         * gets a fresh, empty container, and every file made so far is lost.
+         */
+        $container = null;
 
         /** @var list<string> Every text fragment of the turn, in order. */
         $parts = [];
+
+        /** @var list<string> Files the sandbox handed back, in order. */
+        $fileIds = [];
 
         $calls         = 0;
         $inputTokens   = 0;
@@ -197,8 +233,9 @@ final class ClaudeClient
         $webSearches   = 0;
         $forumSearches = 0;
 
-        $call = function (float $timeout) use (&$messages, $system, $tools, &$calls, &$inputTokens, &$outputTokens, &$cacheRead, &$cacheCreation, &$webSearches): Message {
+        $call = function (float $timeout) use (&$messages, $system, $tools, &$container, &$fileIds, &$calls, &$inputTokens, &$outputTokens, &$cacheRead, &$cacheCreation, &$webSearches): Message {
             $message = $this->client($timeout)->messages->create(
+                container: $container,
                 maxTokens: $this->settings->maxTokens(),
                 messages: $messages,
                 model: $this->settings->model(),
@@ -223,6 +260,12 @@ final class ClaudeClient
             $cacheCreation += $message->usage->cacheCreationInputTokens ?? 0;
             $webSearches   += $message->usage->serverToolUse?->webSearchRequests ?? 0;
 
+            $container = $message->container?->id ?? $container;
+
+            foreach ($this->outputFileIds($message) as $id) {
+                $fileIds[] = $id;
+            }
+
             return $message;
         };
 
@@ -230,7 +273,7 @@ final class ClaudeClient
 
         try {
             while (true) {
-                $message = $call(min(self::TIMEOUT_SECONDS, max(1.0, $deadline - microtime(true))));
+                $message = $call(min($perCall, max(1.0, $deadline - microtime(true))));
 
                 // Text written in a leg that ends by asking for a forum lookup
                 // is the "let me check earlier threads" preamble, not part of
@@ -239,9 +282,7 @@ final class ClaudeClient
                 // reply, fused onto the next leg's first word. Pause legs are
                 // different: the seam falls mid-answer, so they are kept.
                 if ($message->stopReason !== 'tool_use') {
-                    foreach ($this->textParts($message) as $part) {
-                        $parts[] = $part;
-                    }
+                    $this->collectText($message, $parts);
                 }
 
                 $continuing = $message->stopReason === 'pause_turn' || $message->stopReason === 'tool_use';
@@ -270,11 +311,9 @@ final class ClaudeClient
                     $messages[] = ['role' => 'assistant', 'content' => $message->content];
                     $messages[] = ['role' => 'user', 'content' => $this->withRollingBreakpoint($messages, $refusals)];
 
-                    $message = $call(min(self::TIMEOUT_SECONDS, max(30.0, $deadline - microtime(true))));
+                    $message = $call(min($perCall, max(30.0, $deadline - microtime(true))));
 
-                    foreach ($this->textParts($message) as $part) {
-                        $parts[] = $part;
-                    }
+                    $this->collectText($message, $parts);
 
                     break;
                 }
@@ -342,6 +381,7 @@ final class ClaudeClient
                 cacheCreationInputTokens: $cacheCreation,
                 webSearchRequests: $webSearches,
                 forumSearches: $forumSearches,
+                fileIds: $fileIds,
             ), $e);
         }
 
@@ -356,6 +396,7 @@ final class ClaudeClient
             cacheCreationInputTokens: $cacheCreation,
             webSearchRequests: $webSearches,
             forumSearches: $forumSearches,
+            fileIds: $fileIds,
         );
     }
 
@@ -497,7 +538,8 @@ final class ClaudeClient
     }
 
     /**
-     * The text blocks of one message, in order, neither trimmed nor joined.
+     * Append the text blocks of one message to the turn's parts, in order,
+     * neither trimmed nor joined.
      *
      * `content` is a heterogeneous list — with thinking on it also carries
      * thinking blocks (empty-texted by default), and with web search enabled
@@ -520,27 +562,108 @@ final class ClaudeClient
      * boundary does. Trimming per message would eat the space either side of
      * it and fuse two words together.
      *
-     * @return list<string>
+     * @param list<string> $parts the turn's text so far (modified)
      */
-    private function textParts(Message $message): array
+    private function collectText(Message $message, array &$parts): void
     {
-        $parts = [];
-
         foreach ($message->content as $block) {
-            $type = is_array($block) ? ($block['type'] ?? null) : ($block->type ?? null);
+            $type = $this->field($block, 'type');
+
+            // Narration written before or between sandbox runs ("Let me write
+            // the generator…", "That ran 40 seconds short, extending the
+            // coda…") is working notes, not the reply. The answer is what
+            // comes after the last run, so each run starts the reply over.
+            if (in_array($type, self::SANDBOX_RESULT_TYPES, true)) {
+                $parts = [];
+
+                continue;
+            }
 
             if ($type !== 'text') {
                 continue;
             }
 
-            $text = is_array($block) ? ($block['text'] ?? '') : ($block->text ?? '');
+            $text = $this->field($block, 'text');
 
             if (is_string($text) && $text !== '') {
                 $parts[] = $text;
             }
         }
+    }
 
-        return $parts;
+    /**
+     * Files API ids of the files one message's sandbox runs handed back.
+     *
+     * The sandbox gives each command an empty `$OUTPUT_DIR`; whatever is at
+     * its top level when the command finishes is captured and listed as
+     * `{type, file_id}` entries in the result's `content`. Files written
+     * anywhere else stay in the container and are never seen here — which is
+     * why the system prompt tells the model where to put them.
+     *
+     * @return list<string>
+     */
+    private function outputFileIds(Message $message): array
+    {
+        $ids = [];
+
+        foreach ($message->content as $block) {
+            if (! in_array($this->field($block, 'type'), self::SANDBOX_RESULT_TYPES, true)) {
+                continue;
+            }
+
+            $result = $this->field($block, 'content');
+            $outputs = $this->field($result, 'content');
+
+            if (! is_array($outputs)) {
+                continue; // an error result, or a file-view result
+            }
+
+            foreach ($outputs as $output) {
+                $id = $this->field($output, 'fileID') ?? $this->field($output, 'file_id');
+
+                if (is_string($id) && $id !== '') {
+                    $ids[] = $id;
+                }
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * Download one sandbox file, with its name.
+     *
+     * @return array{name: string, bytes: string, size: int}
+     */
+    public function downloadFile(string $fileId): array
+    {
+        $timeout = 60.0;
+        $files   = $this->client($timeout)->beta->files;
+        $betas   = ['files-api-2025-04-14'];
+        $options = ['timeout' => $timeout, 'maxRetries' => 1];
+
+        $meta  = $files->retrieveMetadata($fileId, betas: $betas, requestOptions: $options);
+        $bytes = $files->download($fileId, betas: $betas, requestOptions: $options);
+
+        return ['name' => (string) $meta->filename, 'bytes' => $bytes, 'size' => (int) $meta->sizeBytes];
+    }
+
+    /** Read a field off an SDK object or a plain array alike. */
+    private function field(mixed $from, string $name): mixed
+    {
+        if (is_array($from)) {
+            return $from[$name] ?? null;
+        }
+
+        if (is_object($from)) {
+            try {
+                return $from->{$name} ?? null;
+            } catch (Throwable) {
+                return null;
+            }
+        }
+
+        return null;
     }
 
     private function client(float $timeoutSeconds): Client

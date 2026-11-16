@@ -5,10 +5,14 @@ use Ekumanov\ClaudeReply\Api\ForumAttributes;
 use Ekumanov\ClaudeReply\Console\SearchCommand;
 use Ekumanov\ClaudeReply\Console\TestReplyCommand;
 use Ekumanov\ClaudeReply\Listener\HandleMention;
+use Ekumanov\ClaudeReply\Reply\GeneratedFiles;
 use Ekumanov\ClaudeReply\Settings\ApiKey;
 use Ekumanov\ClaudeReply\Settings\ApiKeyPrivacy;
 use Flarum\Api\Resource\ForumResource;
 use Flarum\Extend;
+use Flarum\Foundation\Paths;
+use Flarum\Http\UrlGenerator;
+use League\Flysystem\Visibility;
 use Flarum\Post\Event\Posted;
 
 return [
@@ -72,6 +76,23 @@ return [
      * Settings\ApiKeyPrivacy for how the settings copy is kept out of the
      * admin page's HTML.
      */
+
+    /*
+     * Where files made in the code-execution sandbox are published. Names
+     * are unguessable and never reused (see Reply\GeneratedFiles), so the
+     * long cache lifetime the assets directory carries is safe.
+     */
+    (new Extend\Filesystem())
+        ->disk(GeneratedFiles::DISK, function (Paths $paths, UrlGenerator $url) {
+            return [
+                'root' => "$paths->public/assets/claude-reply",
+                'url' => $url->to('forum')->path('assets/claude-reply'),
+                // Without this the local adapter creates the directory 0700,
+                // and the queue worker and the web server are often different
+                // users.
+                'visibility' => Visibility::PUBLIC,
+            ];
+        }),
 
     (new Extend\Console())
         ->command(TestReplyCommand::class)

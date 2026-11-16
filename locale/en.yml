@@ -168,6 +168,25 @@ ekumanov-claude-reply:
       web_search_max_uses: Max searches per reply
       web_search_max_uses_help: Caps searches for a single reply.
 
+      code_execution: Allow making files
+      code_execution_help: >-
+        Gives Claude a code-execution sandbox (run by Anthropic, not on this server, with no
+        internet access) so it can make files on request — a MIDI file, a chart, a CSV — and
+        attach them to its reply. Files are published under assets/claude-reply. A reply
+        that uses the sandbox can take several minutes. Sandbox time is free when web search
+        is also enabled; otherwise Anthropic bills it per container-hour.
+
+      render_midi_audio: Render MIDI files to MP3
+      render_midi_audio_help: >-
+        When Claude makes a MIDI file, also render it to an MP3 on this server and attach
+        both, so readers can listen without a synthesizer. Needs fluidsynth, lame and a
+        soundfont installed on the server; without them the MIDI is attached on its own.
+
+      soundfont_path: Soundfont
+      soundfont_path_help: >-
+        Path to the .sf2 file used for rendering. Program 0 is used for piano, so a General
+        MIDI soundfont or a dedicated piano soundfont both work.
+
       forum_search: Allow searching this forum
       forum_search_help: >-
         Lets Claude search this forum's other discussions while composing a reply, and

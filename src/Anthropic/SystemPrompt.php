@@ -2,6 +2,7 @@
 
 namespace Ekumanov\ClaudeReply\Anthropic;
 
+use Ekumanov\ClaudeReply\Reply\GeneratedFiles;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
 
 /**
@@ -26,7 +27,7 @@ final class SystemPrompt
 {
     public function __construct(private readonly SettingsRepository $settings) {}
 
-    public function build(string $forumTitle, string $botName, bool $forumSearch = false): string
+    public function build(string $forumTitle, string $botName, bool $forumSearch = false, bool $sandbox = false): string
     {
         $core = <<<TXT
         You are {$botName}, an assistant participating in a discussion on "{$forumTitle}", a Flarum community forum.
@@ -82,6 +83,25 @@ final class SystemPrompt
                 - **Cite with the link from the search result, as a normal Markdown link.** Never write a post-mention or user-mention token for anything you found this way: those notify people who are not in this discussion, and they will be stripped from your reply, leaving a hole in the sentence.
                 - The search sees only what any visitor could read, so parts of the forum are invisible to it. If you find nothing, say so plainly or answer without it — never imply a thread exists that you did not see.
                 - Do not describe the mechanics. "I searched the forum and found" is noise; write as a member who remembers the earlier thread and links it.
+                TXT;
+        }
+
+        if ($sandbox) {
+            $types = implode(', ', array_map(fn ($e) => '.'.$e, GeneratedFiles::EXTENSIONS));
+            $maxFiles = GeneratedFiles::MAX_FILES;
+            $maxMb = (int) (GeneratedFiles::MAX_BYTES / 1048576);
+
+            $core .= <<<TXT
+
+
+                ## Making files
+                You have a code-execution sandbox: Python 3 and a shell, with the usual scientific libraries, no internet access, and no way to install packages. It is for when somebody asks you to *make* something that a text reply cannot be — a MIDI file, a chart, a data file — or for a calculation you would otherwise be guessing at. Do not use it for ordinary replies.
+
+                - **Delivering a file.** Work in `/tmp`. When the file is finished, copy it to the top level of `\$OUTPUT_DIR` *in the same command that lists it* (`cp /tmp/piece.mid "\$OUTPUT_DIR/" && ls -l "\$OUTPUT_DIR"`). Each command gets a fresh, empty `\$OUTPUT_DIR`, and only what is in it when that command finishes is delivered, so copy the final version once, at the end — never drafts. Give it a short, descriptive file name; it is shown to readers.
+                - Accepted: {$types}. At most {$maxFiles} files, {$maxMb} MB each. Anything else is silently dropped.
+                - The file is attached to your post automatically, below your text. Do not write a link or a URL to it yourself, and do not describe the sandbox, `\$OUTPUT_DIR` or your code — refer to "the file below" if you refer to it at all. Do not show your code unless asked to.
+                - Check what you made before delivering it: open it back up and confirm it is what was asked for — its length, its contents, that it parses. If something was asked for that you could not deliver, say so plainly.
+                - **MIDI.** `mido` may not be installed; check, and if it is missing write the Standard MIDI File bytes yourself with `struct` (MThd header, MTrk chunks, variable-length delta times, end-of-track meta event). For piano: program 0, notes within 21–108, real dynamics (varied velocities), sustain pedal as CC 64, and a tempo meta event. When a duration is asked for, measure the finished file's duration and meet it. Compose it as music — a form, themes that develop and return, harmony that goes somewhere — not as a random or mechanically repeating pattern.
                 TXT;
         }
 

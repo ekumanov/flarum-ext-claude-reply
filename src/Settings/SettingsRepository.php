@@ -252,6 +252,40 @@ final class SettingsRepository
     }
 
     /**
+     * Give Claude a code-execution sandbox it can make files in.
+     *
+     * The sandbox runs on Anthropic's side, not on this server, with no
+     * network access. What it adds is the ability to *produce* something —
+     * a MIDI file, a chart — which the reply then carries as an attachment.
+     * Off by default: it lengthens replies that use it to several minutes,
+     * and it publishes files, not just text, under the bot's name.
+     */
+    public function codeExecutionEnabled(): bool
+    {
+        return $this->boolSetting('code_execution', false);
+    }
+
+    /**
+     * Render generated MIDI files to MP3 on this server and attach both.
+     *
+     * Needs fluidsynth, lame and a soundfont installed on the server; see
+     * {@see \Ekumanov\ClaudeReply\Reply\MidiRenderer}. On by default because
+     * it does nothing until those exist, and costs nothing once they do.
+     */
+    public function renderMidiAudio(): bool
+    {
+        return $this->boolSetting('render_midi_audio', true);
+    }
+
+    /** Soundfont used to render MIDI. Program 0 should be a piano. */
+    public function soundfontPath(): string
+    {
+        $v = trim((string) $this->settings->get(self::PREFIX.'soundfont_path'));
+
+        return $v !== '' ? $v : '/usr/share/sounds/sf2/FluidR3_GM.sf2';
+    }
+
+    /**
      * Let Claude search this forum's other discussions while composing.
      *
      * Off by default, and deliberately a separate switch from web search: the

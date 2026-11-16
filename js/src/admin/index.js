@@ -292,6 +292,37 @@ app.initializers.add('ekumanov/claude-reply', () => {
 
   reg.registerSetting(
     {
+      setting: PREFIX + 'code_execution',
+      type: 'boolean',
+      label: t('code_execution'),
+      help: t('code_execution_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'render_midi_audio',
+      type: 'boolean',
+      label: t('render_midi_audio'),
+      help: t('render_midi_audio_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
+      setting: PREFIX + 'soundfont_path',
+      type: 'text',
+      placeholder: '/usr/share/sounds/sf2/FluidR3_GM.sf2',
+      label: t('soundfont_path'),
+      help: t('soundfont_path_help'),
+    },
+    next()
+  );
+
+  reg.registerSetting(
+    {
       setting: PREFIX + 'forum_search',
       type: 'boolean',
       label: t('forum_search'),

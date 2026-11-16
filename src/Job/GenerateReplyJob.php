@@ -9,6 +9,7 @@ use Ekumanov\ClaudeReply\Anthropic\UnfinishedTurnException;
 use Ekumanov\ClaudeReply\BotAccount;
 use Ekumanov\ClaudeReply\Context\ContextBuilder;
 use Ekumanov\ClaudeReply\PostPublisher;
+use Ekumanov\ClaudeReply\Reply\GeneratedFiles;
 use Ekumanov\ClaudeReply\Reply\MentionSanitizer;
 use Ekumanov\ClaudeReply\ReplyLog;
 use Ekumanov\ClaudeReply\Settings\SettingsRepository;
@@ -36,10 +37,12 @@ class GenerateReplyJob extends AbstractJob
     public int $tries = 1;
 
     /**
-     * @var int Wall-clock cap. Must exceed ClaudeClient's 300s request
-     *          timeout with room for context assembly and the publish.
+     * @var int Wall-clock cap. Must exceed ClaudeClient's longest turn budget
+     *          (600s with the code-execution sandbox on, 340s without) with
+     *          room for the token count, downloading generated files, and
+     *          the publish.
      */
-    public int $timeout = 420;
+    public int $timeout = 720;
 
     public function __construct(public readonly int $logId) {}
 
@@ -52,6 +55,7 @@ class GenerateReplyJob extends AbstractJob
         SettingsRepository $settings,
         SettingsRepositoryInterface $rawSettings,
         LoggerInterface $log,
+        GeneratedFiles $files,
     ): void {
         $row = ReplyLog::find($this->logId);
 
@@ -60,7 +64,7 @@ class GenerateReplyJob extends AbstractJob
         }
 
         try {
-            $this->run($row, $contextBuilder, $claude, $publisher, $bot, $sanitizer, $settings, $rawSettings, $log);
+            $this->run($row, $contextBuilder, $claude, $publisher, $bot, $sanitizer, $settings, $rawSettings, $log, $files);
         } catch (Throwable $e) {
             // A turn that failed partway was still billed for the calls that
             // completed. Recording them keeps the ledger honest and — because
@@ -90,6 +94,7 @@ class GenerateReplyJob extends AbstractJob
         SettingsRepository $settings,
         SettingsRepositoryInterface $rawSettings,
         LoggerInterface $log,
+        GeneratedFiles $files,
     ): void {
         $botUser = $bot->get();
         if ($botUser === null) {
@@ -174,7 +179,20 @@ class GenerateReplyJob extends AbstractJob
 
         $text = trim($result->text);
 
-        if ($text === '') {
+        // Files the sandbox made. Fetched before the empty-text check: asked
+        // for "only the file", a reply that is nothing but the attachment is
+        // a complete answer.
+        $attached = $files->publish($result->fileIds, (int) $row->id);
+
+        if ($result->fileIds !== [] && count($attached) < count(array_unique($result->fileIds))) {
+            $log->info('claude-reply: not every generated file was published', [
+                'log_id' => $row->id,
+                'produced' => count($result->fileIds),
+                'published' => count($attached),
+            ]);
+        }
+
+        if ($text === '' && $attached === []) {
             $this->markFailed($row, 'empty response');
             return;
         }
@@ -200,6 +218,12 @@ class GenerateReplyJob extends AbstractJob
 
         $text = $sanitized->text;
 
+        // After sanitising — the attachment links are ours, not the model's —
+        // and before the footer, so the disclosure stays last.
+        if ($attached !== []) {
+            $text = trim($text."\n\n".GeneratedFiles::markdown($attached));
+        }
+
         // Append the disclosure footer, unless the model has already written
         // one. The prompt tells it not to, and its own past posts no longer
         // arrive carrying one, but a paraphrase is still cheap to guard against
@@ -224,6 +248,7 @@ class GenerateReplyJob extends AbstractJob
             'in' => $result->inputTokens,
             'out' => $result->outputTokens,
             'calls' => $result->apiCalls,
+            'files' => count($attached),
         ]);
     }
 

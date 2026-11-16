@@ -25,6 +25,12 @@ final readonly class ReplyResult
         public int $webSearchRequests,
         /** Forum lookups this reply performed — this extension's own tools. */
         public int $forumSearches = 0,
+        /**
+         * @var list<string> Files API ids of files the sandbox handed back,
+         *                   in the order they were produced. Not yet
+         *                   downloaded — see {@see \Ekumanov\ClaudeReply\Reply\GeneratedFiles}.
+         */
+        public array $fileIds = [],
     ) {}
 
     public function isRefusal(): bool

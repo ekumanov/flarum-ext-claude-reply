@@ -112,6 +112,22 @@ Whole-thread-always is wrong: expensive on long threads, and the middle is mostl
 
 Posts are sent as their **unparsed source** (the markdown the author typed), not rendered HTML — cheaper and more faithful.
 
+## Making files (optional)
+
+Turn on **Allow making files** and Claude gets Anthropic's code-execution sandbox: Python and a shell, run on Anthropic's side (not on your server), with no internet access. When a member asks for something a text reply can't be — a MIDI file, a chart, a CSV — Claude writes and runs a program, checks the result, and the file is attached below its reply.
+
+- Files are downloaded from Anthropic's Files API and published under `public/assets/claude-reply/` with unguessable names. Only these types are published: mid, midi, png, jpg, jpeg, webp, gif, pdf, csv, txt, mp3, wav, ogg, flac (never HTML, SVG or scripts), at most 4 per reply, 8 MB each.
+- A reply that uses the sandbox can take several minutes; the turn budget is raised to 10 minutes when the sandbox is on.
+- Sandbox time is free when web search is also enabled; otherwise Anthropic bills it per container-hour (with a monthly free allowance).
+
+**MIDI to MP3.** If the server has `fluidsynth`, `lame` and a soundfont, every generated MIDI file is also rendered to MP3 locally and attached first, so readers can listen without a synthesizer. On Debian/Ubuntu:
+
+```bash
+sudo apt install fluidsynth lame fluid-soundfont-gm
+```
+
+The default soundfont path is `/usr/share/sounds/sf2/FluidR3_GM.sf2`; point **Soundfont** at a dedicated piano .sf2 for a better piano. Without these the MIDI is attached on its own.
+
 ## Privacy
 
 Mentioning the bot sends that discussion's posts — other members' words, under their real display names — to Anthropic. That is the deal; the allow-lists exist so you opt into it deliberately.
