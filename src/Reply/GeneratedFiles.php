@@ -40,6 +40,8 @@ final class GeneratedFiles
 
     private const IMAGES = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
 
+    private const AUDIO = ['mp3', 'wav', 'ogg', 'flac'];
+
     public const MAX_FILES = 4;
 
     public const MAX_BYTES = 8 * 1024 * 1024;
@@ -173,9 +175,16 @@ final class GeneratedFiles
         foreach ($files as $file) {
             $label = str_replace(['[', ']'], '', $file['name']);
 
-            $lines[] = $file['image']
-                ? '!['.$label.']('.$file['url'].')'
-                : '📎 ['.$label.']('.$file['url'].') ('.self::humanSize($file['size']).')';
+            $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+
+            // Images embed; audio is a bare link, because inline-audio style
+            // players turn it into a block of their own and anything around it
+            // on the same line is left stranded above and below the player.
+            $lines[] = match (true) {
+                $file['image'] => '!['.$label.']('.$file['url'].')',
+                in_array($ext, self::AUDIO, true) => '['.$label.']('.$file['url'].')',
+                default => '📎 ['.$label.']('.$file['url'].') ('.self::humanSize($file['size']).')',
+            };
         }
 
         return implode("\n\n", $lines);
